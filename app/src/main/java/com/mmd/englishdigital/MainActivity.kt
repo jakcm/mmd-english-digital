@@ -1,12 +1,19 @@
 package com.mmd.englishdigital
 
 import android.Manifest
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.SurfaceTexture
+import android.media.MediaPlayer
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import android.widget.Button
+import android.view.Surface
+import android.view.TextureView
+import android.widget.ImageButton
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
@@ -19,52 +26,47 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
     private lateinit var statusTv: TextView
     private lateinit var transcriptTv: TextView
     private lateinit var scroll: ScrollView
-    private lateinit var btnCall: Button
-    private lateinit var btnTest: Button
+    private lateinit var btnCall: ImageButton
+    private lateinit var btnTest: ImageButton
+    private lateinit var btnRotate: ImageButton
+    private lateinit var btnSettings: ImageButton
     private lateinit var swAuto: Switch
+    private lateinit var avatarView: TextureView
 
     private var client: SeeduplexClient? = null
     private var capture: AudioCapture? = null
     private var player: AudioPlayer? = null
 
-    // ---- 自动模式（新增，均不影响 SeeduplexClient / AudioIo）----
+    // ---- 数字人视频头像（循环静音播放）----
+    private var avatarPlayer: MediaPlayer? = null
+
+    // ---- 自动模式（不影响 SeeduplexClient / AudioIo）----
     private var controller: AutoCallController? = null
     private var localVad: LocalVad? = null
     private var monitorCapture: AudioCapture? = null
 
     // ---- 通话中打断 / barge-in（用户插话即停播并进入下一轮）----
     private var bargeVad: LocalVad? = null
-    @Volatile private var aiResponding = false   // AI 正在下发/播报本轮音频
-    @Volatile private var bargeArmed = false      // 本轮已打断过，避免重复 cancel
-    @Volatile private var dropAudio = false       // 打断后丢弃被取消回复的残余音频
-    @Volatile private var bargeSilenceSeen = false // 需先观察到一段静音，才允许判处插话
+    @Volatile private var aiResponding = false
+    @Volatile private var bargeArmed = false
+    @Volatile private var dropAudio = false
+    @Volatile private var bargeSilenceSeen = false
 
     private val main = Handler(Looper.getMainLooper())
     private val userBuf = StringBuilder()
     private val aiBuf = StringBuilder()
     private var callActive = false
     private var receivedAudioBytes = 0L
+    private var lastStatus: String = ""
+
+    // API Key 仅存本机（明文），不写入源码或 APK
+    private val prefs by lazy { getSharedPreferences("mmd_prefs", MODE_PRIVATE) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
-        statusTv = findViewById(R.id.status)
-        transcriptTv = findViewById(R.id.transcript)
-        scroll = findViewById(R.id.scroll)
-        btnCall = findViewById(R.id.btnCall)
-        btnTest = findViewById(R.id.btnTest)
-        swAuto = findViewById(R.id.swAuto)
 
-        setStatus(
-            if (BuildConfig.VOLC_API_KEY.isEmpty()) "⚠️ 未注入 API Key"
-            else "API Key 已就绪"
-        )
-
-        // 本地 VAD（仅自动监听用）
         localVad = LocalVad { isSpeech -> controller?.onMonitorSpeech(isSpeech) }
-        // 通话中打断用的本地 VAD（与监听互不影响）
         bargeVad = LocalVad { isSpeech -> onBargeVad(isSpeech) }
-
         controller = AutoCallController(object : AutoCallController.Callbacks {
             override fun requestDial() = startCall()
             override fun requestHangup() = hangup()
@@ -73,26 +75,186 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
             override fun onStateChanged(label: String) { setStatus(label) }
         })
 
-        btnCall.setOnClickListener { if (callActive) hangup() else startCall() }
-        btnTest.setOnClickListener { feedTestAudio() }
-        swAuto.isChecked = true
-        swAuto.setOnCheckedChangeListener { _, checked ->
-            controller?.enabled = checked
-            if (checked) appendSystem("自动模式：开")
-            else appendSystem("自动模式：关（回到手动）")
-        }
+        applyLayout()
 
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            ActivityCompat.requestPermissions(
-                this, arrayOf(Manifest.permission.RECORD_AUDIO), 1
-            )
+        if (apiKey().isEmpty()) {
+            refreshKeyStatus()
+            promptForKey()               // 首次启动：先让用户填写 API Key
         } else {
-            controller?.start()   // 默认启动即拨打
+            refreshKeyStatus()
+            ensurePermissionThenAutoStart()
         }
 
         runVadSelfTest()
+    }
+
+    // ---------- API Key：本机填写与保存（不走构建注入，APK 内不含 Key）----------
+
+    private fun apiKey(): String = prefs.getString(PREF_KEY, "") ?: ""
+
+    private fun refreshKeyStatus() {
+        setStatus(if (apiKey().isEmpty()) "⚠️ 未设置 API Key（点右上角 ⚙ 填写）" else "API Key 已就绪")
+    }
+
+    private fun ensurePermissionThenAutoStart() {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 1)
+        } else {
+            controller?.start()   // 默认启动即拨打
+        }
+    }
+
+    /** 设置页：填写 / 修改 / 清空 API Key（本地明文保存）。 */
+    private fun promptForKey() {
+        val edit = android.widget.EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_TEXT
+            hint = "X-Api-Key"
+            setText(apiKey())
+            setSingleLine(true)
+            setTextColor(getColor(R.color.text_primary))
+            setHintTextColor(getColor(R.color.text_secondary))
+        }
+        val pad = (24 * resources.displayMetrics.density).toInt()
+        val wrap = android.widget.FrameLayout(this).apply {
+            setPadding(pad, pad / 2, pad, 0)
+            addView(edit)
+        }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("设置实时语音 API Key")
+            .setMessage("填入火山引擎 Seeduplex 的 API Key，仅保存在本机，不写入 APK。")
+            .setView(wrap)
+            .setPositiveButton("保存") { _, _ ->
+                prefs.edit().putString(PREF_KEY, edit.text.toString().trim()).apply()
+                refreshKeyStatus()
+                appendSystem(if (apiKey().isEmpty()) "API Key 已清空" else "API Key 已保存")
+                if (apiKey().isNotEmpty()) ensurePermissionThenAutoStart()
+            }
+            .setNeutralButton("清空") { _, _ ->
+                prefs.edit().remove(PREF_KEY).apply()
+                refreshKeyStatus()
+                appendSystem("API Key 已清空")
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    // ---------- UI 绑定（支持横竖屏切换重建）----------
+
+    private fun applyLayout() {
+        setContentView(R.layout.activity_main)
+        hideStatusBar()
+        statusTv = findViewById(R.id.status)
+        transcriptTv = findViewById(R.id.transcript)
+        scroll = findViewById(R.id.scroll)
+        btnCall = findViewById(R.id.btnCall)
+        btnTest = findViewById(R.id.btnTest)
+        btnRotate = findViewById(R.id.btnRotate)
+        btnSettings = findViewById(R.id.btnSettings)
+        swAuto = findViewById(R.id.swAuto)
+        avatarView = findViewById(R.id.avatarView)
+
+        btnCall.setOnClickListener { if (callActive) hangup() else startCall() }
+        btnTest.setOnClickListener { feedTestAudio() }
+        btnRotate.setOnClickListener { toggleOrientation() }
+        btnSettings.setOnClickListener { promptForKey() }
+
+        swAuto.isChecked = controller?.enabled ?: true
+        swAuto.setOnCheckedChangeListener { _, checked ->
+            controller?.enabled = checked
+            if (checked) appendSystem("自动模式：开") else appendSystem("自动模式：关（回到手动）")
+        }
+
+        updateCallUi()
+        render()
+        if (lastStatus.isNotEmpty()) statusTv.text = lastStatus
+        startAvatar()
+    }
+
+    /** 隐藏系统状态栏（沉浸式），观感更干净。 */
+    private fun hideStatusBar() {
+        try {
+            val c = androidx.core.view.WindowInsetsControllerCompat(window, window.decorView)
+            c.hide(androidx.core.view.WindowInsetsCompat.Type.statusBars())
+            c.systemBarsBehavior =
+                androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        } catch (e: Exception) {
+            Log.w(TAG, "hideStatusBar failed: ${e.message}")
+        }
+    }
+
+    private fun updateCallUi() {
+        if (callActive) {
+            btnCall.setImageResource(R.drawable.ic_call_end)
+            btnCall.setBackgroundResource(R.drawable.bg_btn_ghost)
+            btnCall.imageTintList = android.content.res.ColorStateList.valueOf(
+                getColor(R.color.danger)
+            )
+        } else {
+            btnCall.setImageResource(R.drawable.ic_phone)
+            btnCall.setBackgroundResource(R.drawable.bg_btn_primary)
+            btnCall.imageTintList = android.content.res.ColorStateList.valueOf(
+                getColor(R.color.bg_top)
+            )
+        }
+    }
+
+    private fun toggleOrientation() {
+        val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        requestedOrientation = if (landscape) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        else ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        applyLayout()   // 旋转后按新方向重建布局，通话状态不受影响
+    }
+
+    // ---------- 数字人视频头像：循环 + 静音 ----------
+
+    private fun startAvatar() {
+        avatarView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+            override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
+                playAvatar(Surface(st))
+            }
+
+            override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {}
+
+            override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
+                releaseAvatar(); return true
+            }
+
+            override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
+        }
+        // 若 surface 已就绪，立即播放
+        if (avatarView.isAvailable) {
+            avatarView.surfaceTexture?.let { playAvatar(Surface(it)) }
+        }
+    }
+
+    private fun playAvatar(surface: Surface) {
+        releaseAvatar()
+        avatarPlayer = try {
+            MediaPlayer().apply {
+                setDataSource(
+                    this@MainActivity,
+                    Uri.parse("android.resource://$packageName/${R.raw.avatar}")
+                )
+                setSurface(surface)
+                isLooping = true
+                setVolume(0f, 0f)   // 静音：数字人视频不发声音，避免干扰对话
+                setOnPreparedListener { start() }
+                prepareAsync()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "avatar play failed: ${e.message}"); null
+        }
+    }
+
+    private fun releaseAvatar() {
+        try { avatarPlayer?.release() } catch (_: Exception) {}
+        avatarPlayer = null
     }
 
     /** 一次性诊断：用内置英文语音喂本地 VAD，验证原生库判语音能力（不影响主流程）。 */
@@ -148,7 +310,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
             try { Thread.sleep(2500) } catch (_: InterruptedException) { return@Thread }
             if (controller?.state != AutoCallController.State.MONITORING) return@Thread
             Log.i(TAG, "DEBUG: simulate user speech → feed VAD")
-            monitorCapture?.stop(); monitorCapture = null   // 停掉静音采集，避免与模拟语音交错
+            monitorCapture?.stop(); monitorCapture = null
             val pcm = loadAsset("test_input.pcm") ?: return@Thread
             var off = 0
             while (off < pcm.size) {
@@ -165,12 +327,14 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
         localVad?.flush()
     }
 
-    // ---------- 既有主流程（未改动核心逻辑）----------
+    // ---------- 主流程 ----------
 
     private fun startCall() {
-        val key = BuildConfig.VOLC_API_KEY
+        val key = apiKey()
         if (key.isEmpty()) {
-            toast("缺少 API Key（构建时未注入）"); return
+            toast("请先在设置中填写 API Key")
+            promptForKey()
+            return
         }
         if (callActive) return
         userBuf.setLength(0); aiBuf.setLength(0); receivedAudioBytes = 0
@@ -192,7 +356,6 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
             Log.i(TAG, "AudioPlayer started=$ok")
             if (!ok) appendSystem("AudioTrack 不可用（当前环境无音频输出），仅统计收到的音频字节")
         }
-        // 麦克风帧：持续上行给模型，同时喂给本地 VAD 做打断检测
         capture = AudioCapture { frame ->
             client?.sendAudio(frame)
             bargeVad?.feed(frame)
@@ -202,7 +365,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
         if (!micOk) appendSystem("麦克风不可用（模拟器）→ 请点「测试音频」喂内置语音")
 
         callActive = true
-        btnCall.text = getString(R.string.btn_hangup)
+        main.post { updateCallUi() }
     }
 
     private fun hangup() {
@@ -212,7 +375,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
         aiResponding = false; bargeArmed = false; dropAudio = false; bargeSilenceSeen = false
         bargeVad?.flush()
         callActive = false
-        btnCall.text = getString(R.string.btn_call)
+        main.post { updateCallUi() }
         setStatus("已挂断")
         controller?.onCallEnded()   // 通知状态机（自动模式下进入监听）
     }
@@ -223,11 +386,10 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
     private fun onBargeVad(isSpeech: Boolean) {
         if (!callActive || !aiResponding || bargeArmed) return
         if (!isSpeech) {
-            bargeSilenceSeen = true          // 用户问题说完、进入静音，之后才算“插话”
+            bargeSilenceSeen = true
             return
         }
-        if (!bargeSilenceSeen) return        // 仍是上一句的尾音，不算打断
-        // 用户插话：主动取消当前回复 + 立即停播，继续上行进入下一轮识别
+        if (!bargeSilenceSeen) return
         bargeArmed = true
         dropAudio = true
         aiResponding = false
@@ -291,12 +453,34 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
 
     override fun onUserText(delta: String, final: Boolean) {
         controller?.onUserActivity()
+        // E2：仅在整句完成时判定；A1+规则：前 7 个字内含有"退出"或"关闭"即退出
+        if (final && isExitCommand(delta)) {
+            main.post { exitByVoice() }
+            return
+        }
         main.post {
             userBuf.setLength(0)
             if (delta.isNotEmpty()) userBuf.append(delta)
             if (final) userBuf.append("\n")
             render()
         }
+    }
+
+    /** 语音退出判定：整句文本「前 7 个字」内含有"退出"或"关闭"。 */
+    private fun isExitCommand(text: String): Boolean {
+        val head = text.trim().take(7)
+        return head.contains("退出") || head.contains("关闭")
+    }
+
+    /** 执行语音退出：先挂断会话，再结束任务并结束进程（C1 / D1）。 */
+    private fun exitByVoice() {
+        Log.i(TAG, "语音退出指令命中 → 退出应用")
+        try { appendSystem("⏹ 收到退出指令，正在退出…") } catch (_: Exception) {}
+        controller?.release()                      // 停自动模式，避免挂断后进入监听/重拨
+        try { if (callActive) hangup() } catch (_: Exception) {}
+        stopMonitoring()
+        finishAndRemoveTask()
+        android.os.Process.killProcess(android.os.Process.myPid())
     }
 
     override fun onAssistantText(delta: String) {
@@ -314,7 +498,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
 
     override fun onAudioDelta(pcm: ByteArray) {
         controller?.onAiAudio()
-        if (dropAudio) return          // 被取消回复的残余音频，直接丢弃
+        if (dropAudio) return
         player?.write(pcm)
         receivedAudioBytes += pcm.size
     }
@@ -328,7 +512,6 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
     }
 
     override fun onUserTurnStarted() {
-        // 服务端 VAD 检出用户开口（全双工 barge-in）：若 AI 正在播报则立即停播
         onServerBarge()
     }
 
@@ -346,6 +529,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
     // ---------- helpers ----------
 
     private fun render() {
+        if (!::transcriptTv.isInitialized) return
         transcriptTv.text = "👤 用户: $userBuf\n\n🤖 Emma: $aiBuf"
         scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
     }
@@ -355,10 +539,15 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
         render()
     }
 
-    private fun setStatus(s: String) = main.post { statusTv.text = s }
+    private fun setStatus(s: String) = main.post {
+        lastStatus = s
+        if (::statusTv.isInitialized) statusTv.text = s
+    }
+
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 
     override fun onDestroy() {
+        releaseAvatar()
         controller?.release()
         stopMonitoring()
         localVad?.release()
@@ -367,5 +556,8 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
         super.onDestroy()
     }
 
-    companion object { const val TAG = "MMD-English" }
+    companion object {
+        const val TAG = "MMD-English"
+        const val PREF_KEY = "volc_api_key"
+    }
 }

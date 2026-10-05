@@ -3,8 +3,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// API Key 从环境变量注入，不写死在源码里；构建时读取
-def volcApiKey = System.getenv("STRICTLY_CONFIDENTIAL_API_KEY_VOLCENGINE_MMD_ENGLISH_DIGITAL") ?: ""
+// 注意：API Key 不在此构建时注入，也不写入源码或 APK。
+// Key 由用户在 App 的「设置」页手动填写，仅保存在本机（SharedPreferences 明文）。
 
 android {
     namespace = "com.mmd.englishdigital"
@@ -16,7 +16,6 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
-        buildConfigField "String", "VOLC_API_KEY", "\"$volcApiKey\""
     }
 
     buildTypes {

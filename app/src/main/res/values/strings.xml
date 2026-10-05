@@ -2,10 +2,14 @@
     <string name="app_name">MMD English Digital</string>
     <string name="title">MMD English Digital</string>
     <string name="subtitle">实时英语语音对话 · Seeduplex 全双工</string>
+    <string name="avatar_name">Emma</string>
+    <string name="avatar_sub">English Conversation Partner</string>
     <string name="btn_call">拨打</string>
     <string name="btn_hangup">挂断</string>
-    <string name="btn_test">测试音频（喂内置语音）</string>
+    <string name="btn_test">测试音频</string>
+    <string name="rotate">旋转屏幕</string>
+    <string name="settings">设置 API Key</string>
     <string name="hint">无麦克风环境（模拟器）：点「测试音频」流式发送内置英文语音，验证端到端链路。</string>
     <string name="status_idle">未连接</string>
-    <string name="auto_mode">自动模式（启动即拨打 · 静默自动挂断 · 说话自动重拨）</string>
+    <string name="auto_mode">自动</string>
 </resources>

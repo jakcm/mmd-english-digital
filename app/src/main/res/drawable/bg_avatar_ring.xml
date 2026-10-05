@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- oval 背景：既提供圆形 outline（配合 clipToOutline 裁出圆形），又画出描边环 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <solid android:color="#01000000" />
+    <stroke android:width="2dp" android:color="@color/avatar_ring" />
+</shape>
