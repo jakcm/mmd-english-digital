@@ -32,6 +32,13 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
     private var localVad: LocalVad? = null
     private var monitorCapture: AudioCapture? = null
 
+    // ---- 通话中打断 / barge-in（用户插话即停播并进入下一轮）----
+    private var bargeVad: LocalVad? = null
+    @Volatile private var aiResponding = false   // AI 正在下发/播报本轮音频
+    @Volatile private var bargeArmed = false      // 本轮已打断过，避免重复 cancel
+    @Volatile private var dropAudio = false       // 打断后丢弃被取消回复的残余音频
+    @Volatile private var bargeSilenceSeen = false // 需先观察到一段静音，才允许判处插话
+
     private val main = Handler(Looper.getMainLooper())
     private val userBuf = StringBuilder()
     private val aiBuf = StringBuilder()
@@ -55,6 +62,8 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
 
         // 本地 VAD（仅自动监听用）
         localVad = LocalVad { isSpeech -> controller?.onMonitorSpeech(isSpeech) }
+        // 通话中打断用的本地 VAD（与监听互不影响）
+        bargeVad = LocalVad { isSpeech -> onBargeVad(isSpeech) }
 
         controller = AutoCallController(object : AutoCallController.Callbacks {
             override fun requestDial() = startCall()
@@ -165,6 +174,8 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
         }
         if (callActive) return
         userBuf.setLength(0); aiBuf.setLength(0); receivedAudioBytes = 0
+        aiResponding = false; bargeArmed = false; dropAudio = false; bargeSilenceSeen = false
+        bargeVad?.flush()
         render()
         setStatus("连接中…")
 
@@ -181,7 +192,11 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
             Log.i(TAG, "AudioPlayer started=$ok")
             if (!ok) appendSystem("AudioTrack 不可用（当前环境无音频输出），仅统计收到的音频字节")
         }
-        capture = AudioCapture { frame -> client?.sendAudio(frame) }
+        // 麦克风帧：持续上行给模型，同时喂给本地 VAD 做打断检测
+        capture = AudioCapture { frame ->
+            client?.sendAudio(frame)
+            bargeVad?.feed(frame)
+        }
         val micOk = capture?.start() ?: false
         Log.i(TAG, "AudioCapture started=$micOk")
         if (!micOk) appendSystem("麦克风不可用（模拟器）→ 请点「测试音频」喂内置语音")
@@ -194,10 +209,41 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
         capture?.stop(); capture = null
         player?.stop(); player = null
         client?.close(); client = null
+        aiResponding = false; bargeArmed = false; dropAudio = false; bargeSilenceSeen = false
+        bargeVad?.flush()
         callActive = false
         btnCall.text = getString(R.string.btn_call)
         setStatus("已挂断")
         controller?.onCallEnded()   // 通知状态机（自动模式下进入监听）
+    }
+
+    // ---------- 打断 / barge-in ----------
+
+    /** 本地 VAD 判语音（每 20ms 一帧，来自音频采集线程）。仅在 AI 正在播报时打断。 */
+    private fun onBargeVad(isSpeech: Boolean) {
+        if (!callActive || !aiResponding || bargeArmed) return
+        if (!isSpeech) {
+            bargeSilenceSeen = true          // 用户问题说完、进入静音，之后才算“插话”
+            return
+        }
+        if (!bargeSilenceSeen) return        // 仍是上一句的尾音，不算打断
+        // 用户插话：主动取消当前回复 + 立即停播，继续上行进入下一轮识别
+        bargeArmed = true
+        dropAudio = true
+        aiResponding = false
+        player?.interrupt()
+        client?.sendCancel()
+        main.post { appendSystem("⏹ 本地 VAD 检出用户插话 → 打断 AI 播报，进入下一轮") }
+    }
+
+    /** 服务端已检测到用户开口：立即清空本地播放缓冲（与官方网页一致）。 */
+    private fun onServerBarge() {
+        if (!callActive || !aiResponding) return
+        bargeArmed = true
+        dropAudio = true
+        aiResponding = false
+        player?.interrupt()
+        main.post { appendSystem("⏹ 服务端检出用户开口 → 停止播报，进入下一轮") }
     }
 
     /** 无麦克风环境下的测试通道：把内置 PCM 按 20ms 节奏喂给模型。 */
@@ -259,17 +305,35 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
         }
     }
 
+    override fun onAudioStarted() {
+        aiResponding = true
+        bargeArmed = false
+        dropAudio = false
+        bargeSilenceSeen = false
+    }
+
     override fun onAudioDelta(pcm: ByteArray) {
         controller?.onAiAudio()
+        if (dropAudio) return          // 被取消回复的残余音频，直接丢弃
         player?.write(pcm)
         receivedAudioBytes += pcm.size
     }
 
     override fun onAudioDone() {
+        aiResponding = false
         main.post {
             aiBuf.append("\n"); render()
             setStatus("🔊 收到 AI 音频累计 ${receivedAudioBytes} 字节（约 ${receivedAudioBytes / 48}ms @24k/16bit）")
         }
+    }
+
+    override fun onUserTurnStarted() {
+        // 服务端 VAD 检出用户开口（全双工 barge-in）：若 AI 正在播报则立即停播
+        onServerBarge()
+    }
+
+    override fun onResponseCanceled() {
+        main.post { appendSystem("服务端已取消当前回复") }
     }
 
     override fun onError(msg: String) {
@@ -298,6 +362,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
         controller?.release()
         stopMonitoring()
         localVad?.release()
+        bargeVad?.release()
         if (callActive) hangup()
         super.onDestroy()
     }

@@ -118,6 +118,19 @@ class AudioPlayer(private val sampleRate: Int = SeeduplexClient.OUT_RATE) {
         }
     }
 
+    /**
+     * 立即停止当前播报并丢弃尚未播放的缓冲（用户打断 / barge-in 用）。
+     * AudioTrack.flush() 要求处于 pause/stop 状态，故按 pause → flush → play 复位。
+     */
+    fun interrupt() {
+        try {
+            track?.pause()
+            track?.flush()
+            track?.play()
+        } catch (_: Exception) {
+        }
+    }
+
     fun stop() {
         try { track?.stop() } catch (_: Exception) {}
         try { track?.release() } catch (_: Exception) {}

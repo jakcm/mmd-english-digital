@@ -27,6 +27,13 @@ class SeeduplexClient(
         fun onAudioDelta(pcm: ByteArray)
         fun onAudioDone()
         fun onError(msg: String)
+
+        /** 服务端开始下发某一轮 AI 音频（新回复开始）。 */
+        fun onAudioStarted()
+        /** 服务端检测到用户开口（全双工 barge-in 信号；也用于每轮用户说话开始）。 */
+        fun onUserTurnStarted()
+        /** 服务端确认已取消当前回复（response.cancel 的 ack）。 */
+        fun onResponseCanceled()
     }
 
     companion object {
@@ -121,6 +128,21 @@ class SeeduplexClient(
         )
     }
 
+    /**
+     * 客户端主动打断：取消进行中的回复（服务端会停止生成并回 response.canceled），
+     * 便于用户插话后直接进入下一轮识别。
+     */
+    fun sendCancel() {
+        val w = ws ?: return
+        if (!opened) return
+        w.send(
+            JSONObject()
+                .put("type", "response.cancel")
+                .put("event_id", UUID.randomUUID().toString())
+                .toString()
+        )
+    }
+
     fun close() {
         try {
             ws?.send(
@@ -151,6 +173,9 @@ class SeeduplexClient(
             "conversation.item.input_audio_transcription.delta" ->
                 listener.onUserText(obj.optString("delta").ifEmpty { obj.optString("text") }, false)
 
+            "conversation.item.input_audio_transcription.started" ->
+                listener.onUserTurnStarted()
+
             "conversation.item.input_audio_transcription.completed" ->
                 listener.onUserText(
                     obj.optString("text").ifEmpty { obj.optString("transcript") }, true
@@ -158,6 +183,8 @@ class SeeduplexClient(
 
             "response.output_text.delta" ->
                 listener.onAssistantText(obj.optString("delta").ifEmpty { obj.optString("text") })
+
+            "response.output_audio.started" -> listener.onAudioStarted()
 
             "response.output_audio.delta" -> {
                 val b64 = obj.optString("delta").ifEmpty { obj.optString("audio") }
@@ -170,6 +197,8 @@ class SeeduplexClient(
             }
 
             "response.output_audio.done" -> listener.onAudioDone()
+
+            "response.canceled" -> listener.onResponseCanceled()
 
             "error" -> {
                 val err = obj.optJSONObject("error")
