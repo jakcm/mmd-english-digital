@@ -46,6 +46,15 @@ dependencies {
     implementation("com.google.android.material:material:1.11.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
-    // 本地 VAD（WebRTC VAD GMM）；2.0.9 用 Kotlin 1.9.21 构建，与本项目 1.9.23 兼容
+    // 本地 VAD（WebRTC VAD GMM）；2.0.9 用 Kotlin 1.9.21 构建，与本项目兼容
     implementation("com.cloudflare.realtimekit.android-vad:webrtc:2.0.9")
+
+    // ---- 软件回声消除（WebRTC AEC3）----
+    // 说明：官方坐标 cn.enaium.webrtc.aec3:webrtc-aec3-kmp:1.0.3 的 AAR 写死了
+    // minCompileSdk=37，本工程 AGP 8.4.0 / compileSdk 34 无法直接依赖。
+    // 因此把 AAR 解包后的 classes.jar（含 Kotlin 2.2 API）与 arm64-v8a 的
+    // libwebrtc_aec3_jni.so 直接内置到工程里（app/libs 与 app/src/main/jniLibs）。
+    // 需要支持其它 ABI（如 x86_64 模拟器）时，从同一 AAR 的 jni/<abi>/ 再拷入即可；
+    // 缺失 ABI 时 Aec3Processor 会捕获 UnsatisfiedLinkError 并自动降级。
+    implementation(files("libs/aec3-classes.jar"))
 }

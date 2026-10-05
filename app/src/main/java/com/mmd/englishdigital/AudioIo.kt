@@ -13,6 +13,9 @@ class AudioCapture(private val onFrame: (ByteArray) -> Unit) {
     private var record: AudioRecord? = null
     private var aec: AcousticEchoCanceler? = null
 
+    /** 硬件 AEC 是否真正启用。为 false 的设备（多数安卓电视）需在外部叠加软件 AEC3。 */
+    @Volatile var hwAecActive = false; private set
+
     @Volatile private var running = false
     private var thread: Thread? = null
 
@@ -46,6 +49,11 @@ class AudioCapture(private val onFrame: (ByteArray) -> Unit) {
                 null
             }
         }
+        hwAecActive = aec?.enabled == true
+        Log.i(
+            "AudioCapture",
+            "HW AEC available=${AcousticEchoCanceler.isAvailable()} active=$hwAecActive"
+        )
         running = true
         r.startRecording()
         thread = Thread {
@@ -72,6 +80,13 @@ class AudioCapture(private val onFrame: (ByteArray) -> Unit) {
 class AudioPlayer(private val sampleRate: Int = SeeduplexClient.OUT_RATE) {
     private var track: AudioTrack? = null
     var bytesWritten: Long = 0; private set
+
+    /**
+     * 播放参考（far-end）回调：把即将写入 AudioTrack 的 PCM 原样抛出，
+     * 供软件 AEC3 作为回声消除的参考信号。必须在 write() 之外单独使用，
+     * 不要在其中做耗时操作（运行在网络回调线程）。
+     */
+    var onRender: ((ByteArray) -> Unit)? = null
 
     fun start(): Boolean {
         val minBuf = AudioTrack.getMinBufferSize(
@@ -112,6 +127,8 @@ class AudioPlayer(private val sampleRate: Int = SeeduplexClient.OUT_RATE) {
 
     fun write(pcm: ByteArray) {
         try {
+            // 先把“将要播放”的信号交给 AEC3 作为 far-end 参考（时延由 AEC3 自适应）
+            onRender?.invoke(pcm)
             track?.write(pcm, 0, pcm.size)
             bytesWritten += pcm.size
         } catch (_: Exception) {

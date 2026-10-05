@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.SurfaceTexture
 import android.media.MediaPlayer
+import android.media.audiofx.AcousticEchoCanceler
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -36,6 +37,9 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
     private var client: SeeduplexClient? = null
     private var capture: AudioCapture? = null
     private var player: AudioPlayer? = null
+
+    // ---- 软件回声消除（无硬件 AEC 的设备，如安卓电视）----
+    private var aec: Aec3Processor? = null
 
     // ---- 数字人视频头像（循环静音播放）----
     private var avatarPlayer: MediaPlayer? = null
@@ -351,14 +355,24 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
                 voice = "zh_female_vv_jupiter_bigtts"
             )
         }
+
+        // 软件 AEC3：仅在无硬件 AEC 的设备（多数安卓电视）上启用，手机仍走硬件 AEC，行为不变。
+        // 缺少当前 ABI 的原生库时 createOrNull() 返回 null，自动降级为原逻辑。
+        aec = if (AcousticEchoCanceler.isAvailable()) null else Aec3Processor.createOrNull()
+        if (aec != null) main.post { appendSystem("🎧 软件 AEC3 已启用（本机无硬件回声消除）") }
+
         player = AudioPlayer(SeeduplexClient.OUT_RATE).also {
+            // 把正在播放的 AI 音频作为 AEC3 的 far-end 参考
+            it.onRender = { pcm -> aec?.feedRender(pcm) }
             val ok = it.start()
             Log.i(TAG, "AudioPlayer started=$ok")
             if (!ok) appendSystem("AudioTrack 不可用（当前环境无音频输出），仅统计收到的音频字节")
         }
         capture = AudioCapture { frame ->
-            client?.sendAudio(frame)
-            bargeVad?.feed(frame)
+            // 先做软件回声消除，再同时喂给服务端与本地打断 VAD（两者消费完全一致的信号）
+            val clean = aec?.process(frame) ?: frame
+            if (clean.isNotEmpty()) client?.sendAudio(clean)
+            bargeVad?.feed(clean)
         }
         val micOk = capture?.start() ?: false
         Log.i(TAG, "AudioCapture started=$micOk")
@@ -369,8 +383,10 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
     }
 
     private fun hangup() {
+        player?.onRender = null
         capture?.stop(); capture = null
         player?.stop(); player = null
+        aec?.release(); aec = null
         client?.close(); client = null
         aiResponding = false; bargeArmed = false; dropAudio = false; bargeSilenceSeen = false
         bargeVad?.flush()
@@ -394,6 +410,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
         dropAudio = true
         aiResponding = false
         player?.interrupt()
+        aec?.clearRender()
         client?.sendCancel()
         main.post { appendSystem("⏹ 本地 VAD 检出用户插话 → 打断 AI 播报，进入下一轮") }
     }
@@ -405,6 +422,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
         dropAudio = true
         aiResponding = false
         player?.interrupt()
+        aec?.clearRender()
         main.post { appendSystem("⏹ 服务端检出用户开口 → 停止播报，进入下一轮") }
     }
 

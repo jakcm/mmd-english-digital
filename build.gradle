@@ -1,5 +1,7 @@
 // Top-level build file
 plugins {
     id("com.android.application") version "8.4.0" apply false
-    id("org.jetbrains.kotlin.android") version "1.9.23" apply false
+    // Kotlin 需 >= 2.2：软件 AEC3 库（webrtc-aec3-kmp）是用 Kotlin 2.2.10 构建的，
+    // 低版本编译器读不了它的 2.2 metadata。升级后仍兼容旧的 android-vad 2.0.9（1.9.21 构建）。
+    id("org.jetbrains.kotlin.android") version "2.2.10" apply false
 }

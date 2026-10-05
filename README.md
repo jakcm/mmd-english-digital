@@ -25,9 +25,32 @@
 | 鉴权 | 请求头 `X-Api-Key` |
 | 音频上行 | PCM / 16kHz / 单声道 / 16bit，20ms 一包（640B），Base64 内嵌 `input_audio_buffer.append` |
 | 音频下行 | Base64 内嵌 `response.output_audio.delta`，**`pcm_s16le`（16bit int）24kHz** |
-| 回声消除 | Android `AcousticEchoCanceler`（可用时启用） |
+| 回声消除 | 优先硬件 `AcousticEchoCanceler`；无硬件 AEC 的设备（安卓电视）自动启用 **软件 WebRTC AEC3** 回退 |
 | 语言/栈 | Kotlin + OkHttp + 原生 View |
-| 构建 | Gradle 8.7 / AGP 8.4.0 / Kotlin 1.9.23 / JDK 17 |
+| 构建 | Gradle 8.7 / AGP 8.4.0 / Kotlin 2.2.10 / JDK 17 |
+
+### 软件回声消除（AEC3）—— 安卓电视打断修复
+
+很多安卓电视没有任何音频效果器（`dumpsys media.audio_flinger` 显示 `XML effect configuration failed to load / 0 Effect Chains`），`AcousticEchoCanceler.isAvailable()` 恒为 false。此时 AI 自己外放的声音被麦克风收回，会被云端 VAD 和本地 `bargeVad` 误判为「用户在说话」，导致 **AI 一开口就被自己的声音打断**。
+
+修复方式：在音频 I/O 边界插入一层软件 **WebRTC AEC3**（`Aec3Processor.kt`），**不触碰 SeeduplexClient 协议与 AutoCallController 状态机**：
+
+```
+AI 下行(24k) ─► AudioPlayer.write ─┬─► AudioTrack 播放
+                                   └─► feedRender() [24k→16k] ─► AEC3 far-end
+麦克风(16k)  ─► process() ─► AEC3 ─► 消除后16k ─┬─► client.sendAudio()
+                                                └─► bargeVad.feed()
+```
+
+只在**无硬件 AEC**的设备上启用；手机仍走硬件 AEC，行为不变。
+
+集成要点 / 坑（详见 `Aec3Processor.kt` 头部注释）：
+- AEC3 在 16k 下只接受 **10ms = 160 样本**一帧；far-end 必须**连续按实时节拍**喂入（AI 音频突发到达，需队列 + 定拍线程整流，空闲补零）；
+- AI 下行 24k、麦克风 16k，far-end 需 **24k→16k 重采样**；AEC3 缓冲样本是 **int16 数值范围的 float**；
+- **依赖内置**：官方坐标 `cn.enaium.webrtc.aec3:webrtc-aec3-kmp` 的 AAR 写死 `minCompileSdk=37`，本工程无法直接依赖，故内置其解包产物 `app/libs/aec3-classes.jar` + `app/src/main/jniLibs/arm64-v8a/libwebrtc_aec3_jni.so`；该库用 Kotlin 2.2.10 构建，故 Kotlin 升级到 2.2.10；
+- 需要其它 ABI（如 x86_64 模拟器）时，从同一 AAR 的 `jni/<abi>/` 拷入对应 `.so`；缺失 ABI 时 `Aec3Processor.createOrNull()` 捕获异常自动降级为原逻辑。
+
+> 实机实测（KUNL-250A / Android 12 / arm64-v8a，无硬件 AEC）：回声比底噪高约 38 dB，AEC3 稳定估计时延 ≈ 20 ms，**ERLE ≈ 26 dB**。
 
 ### 协议要点（实测）
 
@@ -40,11 +63,16 @@
 
 ```
 app/src/main/java/com/mmd/englishdigital/
-├── MainActivity.kt          # 通话 UI + 编排（拨号/挂断/测试音频/字幕/自动开关）
+├── MainActivity.kt          # 通话 UI + 编排（拨号/挂断/测试音频/字幕/自动开关；AEC3 接线）
 ├── SeeduplexClient.kt       # Seeduplex 全双工 WebSocket 客户端（协议实现，自动功能零改动）
-├── AudioIo.kt               # 麦克风采集（含 AEC）+ 音频播放（自动功能零改动）
+├── AudioIo.kt               # 麦克风采集（硬件 AEC）+ 音频播放（暴露 AEC3 far-end 参考）
+├── Aec3Processor.kt         # 软件回声消除 WebRTC AEC3（无硬件 AEC 设备的回退；详见文件头注释）
 ├── LocalVad.kt              # 本地 VAD（WebRTC VAD GMM）+ 严格 640 字节定长重打包
 └── AutoCallController.kt    # 自动拨号/挂断状态机（启动即拨 / 静默挂断 / 说话重拨）
+app/libs/
+└── aec3-classes.jar         # 软件 AEC3 的 Kotlin API（从官方 AAR 解包，绕过 minCompileSdk=37）
+app/src/main/jniLibs/arm64-v8a/
+└── libwebrtc_aec3_jni.so    # 软件 AEC3 原生库（arm64-v8a；其它 ABI 从同一 AAR 拷入）
 app/src/main/assets/
 └── test_input.pcm           # 内置英文测试语音（16k/mono/16bit）
 app/src/main/res/raw/
@@ -56,7 +84,7 @@ app/src/main/res/layout-land/    # 横屏布局（左头像 / 右面板）
 ### 本地 VAD 集成要点
 
 - 依赖：com.cloudflare.realtimekit.android-vad:webrtc:2.0.9（Maven Central，MIT，含 4 ABI 原生库）
-- 版本坑：该库 2.0.10 用 Kotlin 2.2 构建，与本项目 Kotlin 1.9.23 元数据不兼容而编译失败；必须用 2.0.9（Kotlin 1.9.21）
+- 版本坑：该库 2.0.10 用 Kotlin 2.2 构建；本项目为配合软件 AEC3 已把 Kotlin 升到 2.2.10，仍沿用 2.0.9（Kotlin 1.9.21 构建，可被更高版本编译器读取）
 - 帧长硬约束：VadWebRTC 在 16kHz 下只接受恰好 320 样本 = 640 字节；LocalVad 内部累加重打包，攒够 640 才判定，余量留存
 - 自检：内置英文语音 245760 字节 ÷ 640 = 384 帧，实测判为语音 259 帧（67%），无帧错误
 - ⚠️ **线程坑（实机崩溃根因）**：VAD 判决在音频采集线程回调，若在该线程直接触发拨号/挂断（会碰 UI 控件），会抛 CalledFromWrongThreadException 崩溃。AutoCallController 已把所有回调入口统一切回主线程执行。
