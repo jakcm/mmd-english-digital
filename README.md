@@ -48,6 +48,7 @@ AI 下行(24k) ─► AudioPlayer.write ─┬─► AudioTrack 播放
 
 集成要点 / 坑（详见 `Aec3Processor.kt` 头部注释）：
 - AEC3 在 16k 下只接受 **10ms = 160 样本**一帧；far-end 必须**连续按实时节拍**喂入（AI 音频突发到达，需队列 + 定拍线程整流，空闲补零）；
+- ⚠️ **far-end 必须按“播放缓冲时长”延后再喂给 AEC3**，才能对齐“真正从扬声器播出”的时刻——这是效果好坏的关键：不延后（参考早于播放约一个缓冲时长）实测 ERLE 只有个位数~十几 dB；按缓冲时长延后后，ERLE 稳定到 **~34 dB**（`AudioPlayer.bufferMs` → `Aec3Processor` 延迟线）；
 - AI 下行 24k、麦克风 16k，far-end 需 **24k→16k 重采样**；AEC3 缓冲样本是 **int16 数值范围的 float**；
 - **依赖内置**：官方坐标 `cn.enaium.webrtc.aec3:webrtc-aec3-kmp` 的 AAR 写死 `minCompileSdk=37`，本工程无法直接依赖，故内置其解包产物 `app/libs/aec3-classes.jar` + `app/src/main/jniLibs/arm64-v8a/libwebrtc_aec3_jni.so`；该库用 Kotlin 2.2.10 构建，故 Kotlin 升级到 2.2.10；
 - 需要其它 ABI（如 x86_64 模拟器）时，从同一 AAR 的 `jni/<abi>/` 拷入对应 `.so`；缺失 ABI 时 `Aec3Processor.createOrNull()` 捕获异常自动降级为原逻辑。

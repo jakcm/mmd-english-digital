@@ -375,9 +375,9 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
         // 但 create()/enabled 实际失败（AudioCapture 里 active=false，效果器是空壳），
         // 此时回声完全没被消除。仅用 isAvailable() 判断会漏判 → 软件 AEC3 不启用 → bug 依旧。
         val hwAec = capture?.hwAecActive == true
-        aec = if (hwAec) null else Aec3Processor.createOrNull()
+        aec = if (hwAec) null else Aec3Processor.createOrNull(player?.bufferMs ?: 0)
         player?.onRender = { pcm -> aec?.feedRender(pcm) }   // 把正在播放的 AI 音频作为 far-end 参考
-        Log.i(TAG, "software AEC3 = ${aec != null} (hwAecActive=$hwAec)")
+        Log.i(TAG, "software AEC3 = ${aec != null} (hwAecActive=$hwAec, playerBufferMs=${player?.bufferMs})")
         if (aec != null) appendSystem("🎧 软件 AEC3 已启用（硬件回声消除未生效）")
 
         callActive = true

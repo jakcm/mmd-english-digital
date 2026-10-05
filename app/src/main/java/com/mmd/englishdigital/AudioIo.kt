@@ -81,6 +81,9 @@ class AudioPlayer(private val sampleRate: Int = SeeduplexClient.OUT_RATE) {
     private var track: AudioTrack? = null
     var bytesWritten: Long = 0; private set
 
+    /** 播放缓冲时长(ms)= AudioTrack 缓冲字节数对应的时间；供 AEC3 对齐 far-end 参考。 */
+    var bufferMs: Int = 0; private set
+
     /**
      * 播放参考（far-end）回调：把即将写入 AudioTrack 的 PCM 原样抛出，
      * 供软件 AEC3 作为回声消除的参考信号。必须在 write() 之外单独使用，
@@ -95,6 +98,8 @@ class AudioPlayer(private val sampleRate: Int = SeeduplexClient.OUT_RATE) {
             AudioFormat.ENCODING_PCM_16BIT
         )
         if (minBuf <= 0) return false
+        val bufBytes = maxOf(minBuf, 8192)
+        bufferMs = bufBytes * 1000 / (sampleRate * 2)
         val t = try {
             AudioTrack.Builder()
                 .setAudioAttributes(
@@ -110,7 +115,7 @@ class AudioPlayer(private val sampleRate: Int = SeeduplexClient.OUT_RATE) {
                         .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                         .build()
                 )
-                .setBufferSizeInBytes(maxOf(minBuf, 8192))
+                .setBufferSizeInBytes(bufBytes)
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
         } catch (e: Exception) {

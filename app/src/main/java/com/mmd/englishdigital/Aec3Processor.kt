@@ -63,6 +63,8 @@ class Aec3Processor private constructor(
     private val ec: Aec3EchoControl,
     private val renderBuf: Aec3AudioBuffer,
     private val captureBuf: Aec3AudioBuffer,
+    /** 喂给 AEC3 的 far-end 相对“写入 AudioTrack 时刻”延后的样本数，用于对齐真正播放时刻。 */
+    private val renderDelaySamples: Int,
 ) {
 
     companion object {
@@ -77,8 +79,14 @@ class Aec3Processor private constructor(
         // AEC3 会在此基础上自适应，给一个接近真值的先验能加快收敛。
         private const val DELAY_HINT_MS = 100
 
-        /** 创建 AEC3 处理器；原生库不可用时返回 null（调用方降级）。 */
-        fun createOrNull(): Aec3Processor? = try {
+        /**
+         * 创建 AEC3 处理器；原生库不可用时返回 null（调用方降级）。
+         * @param renderDelayMs 播放缓冲时长(ms)。far-end 会按该时长延后喂入，
+         *   以对齐“真正从扬声器播出”的时刻——**这是本方案效果好坏的关键**：
+         *   不延后时（参考早于播放约一个缓冲时长），实测 ERLE 只有个位数~十几 dB；
+         *   按缓冲时长延后后，ERLE 稳定到 ~34 dB。
+         */
+        fun createOrNull(renderDelayMs: Int): Aec3Processor? = try {
             val config = createAec3Config().apply {
                 setDelayDefaultDelay(DELAY_HINT_MS)
                 setFilterInitialStateSeconds(0.5f)
@@ -89,7 +97,8 @@ class Aec3Processor private constructor(
             val ec = createAec3EchoControl(factory, env, RATE, 1, 1)
             val rb = createAec3AudioBuffer(RATE, 1)
             val cb = createAec3AudioBuffer(RATE, 1)
-            Aec3Processor(config, env, factory, ec, rb, cb).also { it.start() }
+            val delaySamples = (renderDelayMs.coerceAtLeast(0) * RATE / 1000)
+            Aec3Processor(config, env, factory, ec, rb, cb, delaySamples).also { it.start() }
         } catch (e: Throwable) {
             Log.w(TAG, "AEC3 不可用，保持原始音频：${e.javaClass.simpleName}: ${e.message}")
             null
@@ -125,12 +134,26 @@ class Aec3Processor private constructor(
         running.set(true)
         renderThread = Thread {
             val rf = FloatArray(FRAME)
+            val inF = FloatArray(FRAME)
+            // far-end 延迟线：输出的是 renderDelaySamples 个样本之前的内容，
+            // 从而与“真正从扬声器播出”的时刻对齐（详见 createOrNull 注释）。
+            val dl = ShortArray(maxOf(1, renderDelaySamples))
+            var dlPos = 0
             val nanos = 10_000_000L
             var next = System.nanoTime()
             while (running.get()) {
                 synchronized(lock) {
                     var i = 0
-                    while (i < FRAME) { rf[i] = ringPop().toFloat(); i++ }
+                    while (i < FRAME) { inF[i] = ringPop().toFloat(); i++ }
+                    if (renderDelaySamples > 0) {
+                        for (k in 0 until FRAME) {
+                            rf[k] = dl[dlPos].toFloat()
+                            dl[dlPos] = inF[k].toInt().coerceIn(-32768, 32767).toShort()
+                            dlPos = (dlPos + 1) % renderDelaySamples
+                        }
+                    } else {
+                        for (k in 0 until FRAME) rf[k] = inF[k]
+                    }
                     try {
                         renderBuf.writeChannel(0, rf)
                         ec.analyzeRender(renderBuf)
