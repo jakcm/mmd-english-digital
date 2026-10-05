@@ -1,0 +1,23 @@
+# ---- 构建产物（含编译时注入 API Key 的 BuildConfig.java，务必忽略）----
+build/
+.gradle/
+*.apk
+*.idsig
+*.aab
+
+# ---- 本机相关 ----
+local.properties
+
+# ---- 密钥 / 签名 ----
+*.jks
+*.keystore
+keystore.properties
+release.jks
+
+# ---- IDE / 系统 ----
+.idea/
+*.iml
+.DS_Store
+
+# ---- 临时测试截图 ----
+test_*.png
