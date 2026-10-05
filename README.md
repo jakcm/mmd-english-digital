@@ -42,7 +42,9 @@ AI 下行(24k) ─► AudioPlayer.write ─┬─► AudioTrack 播放
                                                 └─► bargeVad.feed()
 ```
 
-只在**无硬件 AEC**的设备上启用；手机仍走硬件 AEC，行为不变。
+只在**硬件 AEC 未真正生效**（`AcousticEchoCanceler.create(session).enabled == false`）的设备上启用；手机仍走硬件 AEC，行为不变。
+
+> ⚠️ **关键坑（本机实测）**：部分安卓电视 `AcousticEchoCanceler.isAvailable()` 返回 **true**，但 `create()/enabled` 实际失败（效果器是空壳，`enabled` 仍为 false），回声完全没被消除。**必须按“是否真正 enabled”判断**，只看 `isAvailable()` 会漏判，导致软件 AEC3 不启用、bug 依旧。
 
 集成要点 / 坑（详见 `Aec3Processor.kt` 头部注释）：
 - AEC3 在 16k 下只接受 **10ms = 160 样本**一帧；far-end 必须**连续按实时节拍**喂入（AI 音频突发到达，需队列 + 定拍线程整流，空闲补零）；

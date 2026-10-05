@@ -6,7 +6,6 @@ import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.SurfaceTexture
 import android.media.MediaPlayer
-import android.media.audiofx.AcousticEchoCanceler
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -356,14 +355,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
             )
         }
 
-        // 软件 AEC3：仅在无硬件 AEC 的设备（多数安卓电视）上启用，手机仍走硬件 AEC，行为不变。
-        // 缺少当前 ABI 的原生库时 createOrNull() 返回 null，自动降级为原逻辑。
-        aec = if (AcousticEchoCanceler.isAvailable()) null else Aec3Processor.createOrNull()
-        if (aec != null) main.post { appendSystem("🎧 软件 AEC3 已启用（本机无硬件回声消除）") }
-
         player = AudioPlayer(SeeduplexClient.OUT_RATE).also {
-            // 把正在播放的 AI 音频作为 AEC3 的 far-end 参考
-            it.onRender = { pcm -> aec?.feedRender(pcm) }
             val ok = it.start()
             Log.i(TAG, "AudioPlayer started=$ok")
             if (!ok) appendSystem("AudioTrack 不可用（当前环境无音频输出），仅统计收到的音频字节")
@@ -377,6 +369,16 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
         val micOk = capture?.start() ?: false
         Log.i(TAG, "AudioCapture started=$micOk")
         if (!micOk) appendSystem("麦克风不可用（模拟器）→ 请点「测试音频」喂内置语音")
+
+        // 软件 AEC3：依据“硬件 AEC 是否真正生效”决定，而不是仅看 isAvailable()。
+        // 坑（本机实测）：部分安卓电视 AcousticEchoCanceler.isAvailable() 返回 true，
+        // 但 create()/enabled 实际失败（AudioCapture 里 active=false，效果器是空壳），
+        // 此时回声完全没被消除。仅用 isAvailable() 判断会漏判 → 软件 AEC3 不启用 → bug 依旧。
+        val hwAec = capture?.hwAecActive == true
+        aec = if (hwAec) null else Aec3Processor.createOrNull()
+        player?.onRender = { pcm -> aec?.feedRender(pcm) }   // 把正在播放的 AI 音频作为 far-end 参考
+        Log.i(TAG, "software AEC3 = ${aec != null} (hwAecActive=$hwAec)")
+        if (aec != null) appendSystem("🎧 软件 AEC3 已启用（硬件回声消除未生效）")
 
         callActive = true
         main.post { updateCallUi() }
