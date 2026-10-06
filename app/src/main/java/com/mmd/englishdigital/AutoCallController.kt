@@ -33,6 +33,7 @@ class AutoCallController(private val cb: Callbacks) {
         const val REDIAL_SPEECH_MS = 500L
         const val TICK_MS = 500L
         const val FRAME_MS = 20L
+        const val TAG = "MMD-Auto"
     }
 
     @Volatile
@@ -89,6 +90,7 @@ class AutoCallController(private val cb: Callbacks) {
         cb.requestStopMonitoring()   // 先停本地监听，避免与通话采集抢麦
         markUserActivity()
         markAiAudio()
+        android.util.Log.i(TAG, "状态 → DIALING（即将连服务端，开始计费）")
         cb.onStateChanged("自动：拨打中…")
         cb.requestDial()
     }
@@ -96,6 +98,7 @@ class AutoCallController(private val cb: Callbacks) {
     private fun goMonitoring() {
         state = State.MONITORING
         speechRunMs = 0
+        android.util.Log.i(TAG, "状态 → MONITORING（★已断开服务端，仅本地VAD，零费用）")
         cb.onStateChanged("自动：监听中（说话即重拨）")
         cb.requestStartMonitoring()
     }
@@ -107,7 +110,21 @@ class AutoCallController(private val cb: Callbacks) {
         state = State.IN_CALL
         markUserActivity()
         markAiAudio()
+        android.util.Log.i(TAG, "状态 → IN_CALL（已连服务端，开始计费）")
         cb.onStateChanged("自动：通话中（静默 10s 自动挂断）")
+    }
+
+    private fun onTick() {
+        if (state != State.IN_CALL) return
+        val t = System.currentTimeMillis()
+        val silent = t - lastUserActivity
+        val aiIdle = t - lastAiAudio
+        if (silent > SILENCE_HANGUP_MS && aiIdle > AI_IDLE_MS) {
+            android.util.Log.i(TAG, "静默${silent}ms 且 AI空闲${aiIdle}ms → 自动挂断")
+            cb.onStateChanged("自动：静默超时，挂断")
+            state = State.DIALING
+            cb.requestHangup()
+        }
     }
 
     fun onUserActivity() { lastUserActivity = System.currentTimeMillis() }
@@ -126,21 +143,12 @@ class AutoCallController(private val cb: Callbacks) {
         if (isSpeech) {
             speechRunMs += FRAME_MS
             if (speechRunMs >= REDIAL_SPEECH_MS) {
+                android.util.Log.i(TAG, "本地VAD检测到持续说话${speechRunMs}ms → 自动重拨")
                 speechRunMs = 0
                 goDialing()
             }
         } else {
             speechRunMs = 0
-        }
-    }
-
-    private fun onTick() {
-        if (state != State.IN_CALL) return
-        val t = System.currentTimeMillis()
-        if (t - lastUserActivity > SILENCE_HANGUP_MS && t - lastAiAudio > AI_IDLE_MS) {
-            cb.onStateChanged("自动：静默超时，挂断")
-            state = State.DIALING
-            cb.requestHangup()
         }
     }
 

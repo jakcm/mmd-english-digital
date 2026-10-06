@@ -294,18 +294,30 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
     }
 
     private fun updateCallUi() {
-        if (callActive) {
-            btnCall.setImageResource(R.drawable.ic_call_end)
-            btnCall.setBackgroundResource(R.drawable.bg_btn_ghost)
-            btnCall.imageTintList = android.content.res.ColorStateList.valueOf(
-                getColor(R.color.danger)
-            )
-        } else {
-            btnCall.setImageResource(R.drawable.ic_phone)
-            btnCall.setBackgroundResource(R.drawable.bg_btn_primary)
-            btnCall.imageTintList = android.content.res.ColorStateList.valueOf(
-                getColor(R.color.bg_top)
-            )
+        val monitoring = controller?.state == AutoCallController.State.MONITORING
+        when {
+            callActive -> {
+                // 通话中：红色挂断键
+                btnCall.setImageResource(R.drawable.ic_call_end)
+                btnCall.setBackgroundResource(R.drawable.bg_btn_ghost)
+                btnCall.imageTintList =
+                    android.content.res.ColorStateList.valueOf(getColor(R.color.danger))
+            }
+            monitoring -> {
+                // ★ 待机监听中：绿色拨号键 + 呼吸态（表示"说话即可接通"）
+                btnCall.setImageResource(R.drawable.ic_phone)
+                btnCall.setBackgroundResource(R.drawable.bg_btn_primary)
+                btnCall.imageTintList =
+                    android.content.res.ColorStateList.valueOf(getColor(R.color.bg_top))
+                btnCall.alpha = 0.55f
+            }
+            else -> {
+                btnCall.setImageResource(R.drawable.ic_phone)
+                btnCall.setBackgroundResource(R.drawable.bg_btn_primary)
+                btnCall.imageTintList =
+                    android.content.res.ColorStateList.valueOf(getColor(R.color.bg_top))
+                btnCall.alpha = 1f
+            }
         }
     }
 
