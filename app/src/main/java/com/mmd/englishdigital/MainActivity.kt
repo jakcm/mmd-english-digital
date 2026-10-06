@@ -453,13 +453,24 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         val appid = prefs.getString(KEY_APPID, null)?.takeIf { it.isNotBlank() }
             ?: "2446422829"
         val appkey = prefs.getString(KEY_APPKEY, null)?.takeIf { it.isNotBlank() }
-            ?: "PlgvMymc7f3tQnJ6"
+            ?: ""
         val token = prefs.getString(KEY_TOKEN, "") ?: ""
         return Triple(appid, appkey, token)
     }
 
     private fun startOfficialDialog() {
-        val (appid, appkey, token) = creds3()
+        val (pa, pk, pt) = creds3()
+        // 调试用：允许 Intent 覆盖凭据（仅用于 adb 对照测试，正常使用走设置页）
+        val appid = intent?.getStringExtra("appid") ?: pa
+        val appkey = intent?.getStringExtra("appkey") ?: pk
+        val token = intent?.getStringExtra("accessToken") ?: pt
+        // 诊断：MD5 摘要（只输出哈希，不泄露凭据原值）
+        fun md5(s: String): String = java.security.MessageDigest.getInstance("MD5")
+            .digest(s.toByteArray()).joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+        Log.i(TAG, "凭据读取: appid=$appid appkey长度=${appkey.length} token长度=${token.length} 来源=${
+            if (intent?.getStringExtra("appkey") != null) "intent" else "prefs"
+        }")
+        Log.i(TAG, "凭据MD5: appid=${md5(appid)} appkey=${md5(appkey)} token=${md5(token)}")
         if (token.isBlank()) {
             setStatus("⚠️ 请先在设置中填写 Access Token")
             promptForKey()
@@ -509,7 +520,10 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                     return@Thread
                 }
                 e.sendDirective(SpeechEngineDefines.DIRECTIVE_SYNC_STOP_ENGINE, "")
-                val json = """{"dialog":{"extra":{"input_mod":"keep_alive","model":"1.2.1.1"},"bot_name":"豆包"}}"""
+                // 模型版本：Seeduplex 3.0 = 1.2.6.1（官方 demo 默认 1.2.1.1）；可由 Intent 覆盖
+                val model = intent?.getStringExtra("model") ?: "1.2.6.1"
+                val json = """{"dialog":{"extra":{"input_mod":"keep_alive","model":"$model"},"bot_name":"豆包"}}"""
+                Log.i(TAG, "START_ENGINE payload model=$model")
                 val r2 = e.sendDirective(SpeechEngineDefines.DIRECTIVE_START_ENGINE, json)
                 Log.i(TAG, "SDK START_ENGINE = $r2")
                 dialogStarted = r2 == 0

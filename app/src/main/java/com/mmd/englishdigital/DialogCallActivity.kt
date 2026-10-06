@@ -41,7 +41,7 @@ class DialogCallActivity : Activity(), SpeechEngine.SpeechListener {
         // 对话服务需要的固定 AppID（非密钥）
         const val DEFAULT_APPID = "2446422829"
         // 旧版鉴权用的 App Key（设置页可覆盖）
-        const val DEFAULT_APPKEY = "PlgvMymc7f3tQnJ6"
+        const val DEFAULT_APPKEY = ""
         private const val PREF = "mmd_prefs"
         private const val KEY_APPID = "volc_app_id"
         private const val KEY_APPKEY = "volc_app_key"
