@@ -101,12 +101,26 @@ class PocDialogActivity : Activity(), SpeechEngine.SpeechListener {
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_ENGINE_NAME_STRING, SpeechEngineDefines.DIALOG_ENGINE)
                 // ★ 必需：User ID（辅助定位线上问题，可固定字符串）
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_UID_STRING, "mmd-tv-001")
-                // ★★★ appkey 与 api_key 是两个不同的凭据（服务端错误提示：
-                //     invalid X-Api-App-Key: <api_key>, expected:[PlgvMymc7f3tQnJ6]）
+                // ===== 鉴权：严格对照官方 Demo =====
+                // 新版（DialogActivity/DialogDuplexActivity）：api_key + app_key
+                // 旧版（DialogDelegateActivity）：app_id + app_key + app_token
+                // ★ 两版互斥 —— 混用会导致 initEngine=-1
+                val authMode = intent?.getStringExtra("authMode") ?: "new"
                 val appKey = intent?.getStringExtra("appKey") ?: appkey
-                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_API_KEY_STRING, appkey)
-                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_KEY_STRING, appKey)
-                log("api_key 长度=${appkey.length}  appKey=$appKey")
+                val accessToken = intent?.getStringExtra("accessToken")
+                val secretKey = intent?.getStringExtra("secretKey")
+                if (authMode == "old") {
+                    e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_ID_STRING, appid)
+                    e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_KEY_STRING, secretKey ?: appKey)
+                    if (!accessToken.isNullOrEmpty()) {
+                        e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_TOKEN_STRING, accessToken)
+                    }
+                    log("★旧版鉴权: appid=$appid appkey长度=${(secretKey ?: appKey).length} token长度=${accessToken?.length ?: 0}")
+                } else {
+                    e.setOptionString(SpeechEngineDefines.PARAMS_KEY_API_KEY_STRING, appkey)
+                    e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_KEY_STRING, appKey)
+                    log("★新版鉴权: api_key长度=${appkey.length} appKey=$appKey")
+                }
                 // ★ 音频来源：设备麦克风（Dialog 仅支持 Recorder / Stream）
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_RECORDER_TYPE_STRING, SpeechEngineDefines.RECORDER_TYPE_RECORDER)
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_RESOURCE_ID_STRING, RESOURCE_ID)
