@@ -486,7 +486,10 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
 
     override fun onUserText(delta: String, final: Boolean) {
         controller?.onUserActivity()
-        // E2：仅在整句完成时判定；A1+规则：前 7 个字内含有"退出"或"关闭"即退出
+        // 关键词打断（服务端增量转写；前 6 字命中"停/不对"即视为用户打断）
+        // A2：叠加在既有打断（本地 VAD / 服务端 started）之上，作为"精确打断"补充。
+        if (isBargeCommand(delta)) onKeywordBarge()
+        // 退出指令：整句、前 7 字内含"退出/关闭"
         if (final && isExitCommand(delta)) {
             main.post { exitByVoice() }
             return
@@ -497,6 +500,30 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
             if (final) userBuf.append("\n")
             render()
         }
+    }
+
+    /**
+     * 关键词打断判定（服务端转写文本，仅看前 3 个字）：
+     * 命中「停」或「不对」即视为用户想插话——
+     * 「停」已覆盖 停止/暂停/停下/停一下（暂停、停下、停一下 的前 3 字里都含"停"）。
+     * 用增量(delta)即可判定，无需等整句 completed，保证打断及时。
+     */
+    private fun isBargeCommand(text: String): Boolean {
+        val head = text.trim().take(3)
+        val hit = head.contains("停") || head.contains("不对")
+        if (hit) Log.i(TAG, "关键词命中: head=「$head」 aiResponding=$aiResponding callActive=$callActive")
+        return hit
+    }
+
+    /** 关键词打断：立即停播 + 取消当前回复，进入下一轮。 */
+    private fun onKeywordBarge() {
+        if (!callActive || !aiResponding || bargeArmed) return
+        bargeArmed = true
+        dropAudio = true
+        aiResponding = false
+        player?.interrupt()
+        client?.sendCancel()
+        main.post { appendSystem("⏹ 关键词打断（停/不对）→ 停止播报，进入下一轮") }
     }
 
     /** 语音退出判定：整句文本「前 7 个字」内含有"退出"或"关闭"。 */
