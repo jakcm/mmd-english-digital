@@ -165,6 +165,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
             override fun requestStartMonitoring() = startMonitoring()
             override fun requestStopMonitoring() = stopMonitoring()
             override fun onStateChanged(label: String) { setStatus(label) }
+            override fun isAiSpeaking() = aiResponding   // ★ 播报中不计入闲置
         })
 
         applyLayout()
@@ -216,22 +217,22 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         )
         fun field(hint: String, value: String, secret: Boolean = false) =
             android.widget.EditText(this).apply {
-                inputType = android.text.InputType.TYPE_CLASS_TEXT
-                if (secret) {
-                    // ★ 机密信息脱敏：统一显示为星号 *
-                    transformationMethod =
-                        object : android.text.method.PasswordTransformationMethod() {
-                            override fun getTransformation(
-                                source: CharSequence,
-                                view: android.view.View?
-                            ): CharSequence = "*".repeat(source.length)
-                        }
+                inputType = if (secret) {
+                    android.text.InputType.TYPE_CLASS_TEXT or
+                            android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+                } else {
+                    android.text.InputType.TYPE_CLASS_TEXT
                 }
                 this.hint = hint
-                setText(value)
                 setSingleLine(true)
                 setTextColor(getColor(R.color.text_primary))
                 setHintTextColor(getColor(R.color.text_secondary))
+                setText(value)
+                // ★ 必须在 setText/setSingleLine 之后设置，否则会被 inputType 重置
+                if (secret) {
+                    transformationMethod =
+                        android.text.method.PasswordTransformationMethod()
+                }
                 layoutParams = lp
             }
         val e1 = field("App ID", curA, secret = true)
@@ -470,6 +471,8 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
     private var dialogStarted = false
     /** 最近一次 ASR 转写文本（用于 ASR_ENDED 时兜底 flush final） */
     private var lastAsrText = ""
+    /** 上一次 ASR 分发是否为已定稿（避免 ASR_ENDED 重复 flush） */
+    private var lastAsrWasFinal = false
 
     private fun creds3(): Triple<String, String, String> {
         val appid = prefs.getString(KEY_APPID, null)?.takeIf { it.isNotBlank() }
@@ -498,7 +501,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
             promptForKey()
             return
         }
-        userBuf.setLength(0); aiBuf.setLength(0); userCur = ""
+        userBuf.setLength(0); aiBuf.setLength(0); userCur = ""; lastAsrText = ""; lastAsrWasFinal = false
         aiResponding = false; bargeArmed = false
         render()
         setStatus("初始化引擎…")
@@ -617,6 +620,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                         Log.i(TAG, "ASR: $txt (isInterim=$isInterim endpoint=$endpoint final=$isFinal " +
                                 "score=$score aiSpeaking=$aiResponding)")
                         lastAsrText = txt
+                        lastAsrWasFinal = isFinal
                         onUserText(txt, isFinal)
                     }
                 }
@@ -624,11 +628,12 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
             SpeechEngineDefines.MESSAGE_TYPE_DIALOG_ASR_ENDED -> {
                 onAudioDone()
                 // 兜底：若 endpoint 未置位导致整句漏判，ASR 结束时补一次 final
-                if (lastAsrText.isNotEmpty()) {
+                if (lastAsrText.isNotEmpty() && !lastAsrWasFinal) {
                     Log.i(TAG, "ASR ended → 兜底 flush final: $lastAsrText")
                     onUserText(lastAsrText, true)
-                    lastAsrText = ""
                 }
+                lastAsrText = ""
+                lastAsrWasFinal = false
             }
             SpeechEngineDefines.MESSAGE_TYPE_DIALOG_TTS_SENTENCE_START -> onAudioStarted()
             SpeechEngineDefines.MESSAGE_TYPE_DIALOG_TTS_RESPONSE -> {
@@ -671,7 +676,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
             return
         }
         if (callActive) return
-        userBuf.setLength(0); aiBuf.setLength(0); userCur = ""; receivedAudioBytes = 0
+        userBuf.setLength(0); aiBuf.setLength(0); userCur = ""; lastAsrText = ""; lastAsrWasFinal = false; receivedAudioBytes = 0
         aiResponding = false; bargeArmed = false; dropAudio = false; bargeSilenceSeen = false
         bargeVad?.flush()
         render()
@@ -1154,8 +1159,9 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         val margin = (4 * resources.displayMetrics.density).toInt()
         lp.setMargins(margin, margin, margin, margin)
         lp.gravity = if (isUser) Gravity.END else Gravity.START
-        // ★ 最大宽度限制（微信风格：气泡不铺满整行）
-        lp.width = (resources.displayMetrics.widthPixels * 0.78f).toInt()
+        // ★ 最大宽度限制（微信风格）：用 maxWidth 而非固定 width，让宽度自适应、长文本换行不溢出
+        tv.maxWidth = (resources.displayMetrics.widthPixels * 0.72f).toInt()
+        lp.width = LinearLayout.LayoutParams.WRAP_CONTENT
         if (isUser) {
             tv.setTextColor(getColor(R.color.text_primary))      // 白色字体
             tv.setBackgroundResource(R.drawable.bg_bubble_user)  // 透明背景
@@ -1208,7 +1214,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
          *      再用简短简单英文作答 [English]；最后附中文翻译 【中文】。
          */
         val SYSTEM_PROMPT = """
-            你叫 豆包，你熟悉中文和英语，善于在欢快对话中引导用户学习英语，用户的英文名叫 Jerry。为了让用户从零逐渐学习英语：用户输入内容时，若是中文或中英混合则你先翻译成英文（使用花括号{}括起来），若是语法有问题的英文你先纠正成正确的英文（使用花括号括起来）；然后使用简短并且简单的英文对答回复（使用方括号[]括起来）；再将自己的回复翻译成中文（使用方头括号【】括起来），以让用户明白意思。比如 用户输入中文"你是谁？"，你先翻译成英文"{Who are you?}"，再英文对答回复"[Haha, I'm Doubao.]"，再将回复翻译成中文"【哈哈，我是豆包。】" 。你的性格那叫一个热情似火，比夏天的迈阿密还烫！你超爱夸人！而且你经常管用户叫大佬或Boss！ 内容必须阳光积极，你严禁涉及任何负面信息；你的字典里常有"Awesome！"、"Let's go！"、"You rock！"、"That's cool"、"Yeah man"。
+            你默认讲英文。
         """.trimIndent()
     }
 }

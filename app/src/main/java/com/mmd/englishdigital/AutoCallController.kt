@@ -23,6 +23,8 @@ class AutoCallController(private val cb: Callbacks) {
         fun requestStartMonitoring()
         fun requestStopMonitoring()
         fun onStateChanged(label: String)
+        /** ★ AI 是否正在播报（播报期间不计入闲置时间） */
+        fun isAiSpeaking(): Boolean
     }
 
     enum class State { DIALING, IN_CALL, MONITORING }
@@ -116,6 +118,8 @@ class AutoCallController(private val cb: Callbacks) {
 
     private fun onTick() {
         if (state != State.IN_CALL) return
+        // ★ AI 正在播报时不判闲置（闲置计时不应包含 AI 讲话时间）
+        if (cb.isAiSpeaking()) return
         val t = System.currentTimeMillis()
         val silent = t - lastUserActivity
         val aiIdle = t - lastAiAudio
