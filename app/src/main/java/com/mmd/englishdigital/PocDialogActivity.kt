@@ -101,12 +101,14 @@ class PocDialogActivity : Activity(), SpeechEngine.SpeechListener {
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_ENGINE_NAME_STRING, SpeechEngineDefines.DIALOG_ENGINE)
                 // ★ 必需：User ID（辅助定位线上问题，可固定字符串）
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_UID_STRING, "mmd-tv-001")
-                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_ID_STRING, appid)
-                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_KEY_STRING, appkey)
-                // ★ 必需：Token（与 AppKey 是两个不同凭据）
-                if (!appToken.isNullOrEmpty()) {
-                    e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_TOKEN_STRING, appToken)
-                }
+                // ★★★ appkey 与 api_key 是两个不同的凭据（服务端错误提示：
+                //     invalid X-Api-App-Key: <api_key>, expected:[PlgvMymc7f3tQnJ6]）
+                val appKey = intent?.getStringExtra("appKey") ?: appkey
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_API_KEY_STRING, appkey)
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_KEY_STRING, appKey)
+                log("api_key 长度=${appkey.length}  appKey=$appKey")
+                // ★ 音频来源：设备麦克风（Dialog 仅支持 Recorder / Stream）
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_RECORDER_TYPE_STRING, SpeechEngineDefines.RECORDER_TYPE_RECORDER)
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_RESOURCE_ID_STRING, RESOURCE_ID)
                 // 鉴权模式：late_bind 走"新版鉴权"（用 API Key），空则走旧版 access_token
                 if (!authType.isNullOrEmpty()) {
@@ -117,35 +119,19 @@ class PocDialogActivity : Activity(), SpeechEngine.SpeechListener {
                     }
                     log("鉴权模式: type=$authType secret长度=${authSecret.length} credential=${!authCredential.isNullOrEmpty()}")
                 }
-                // 3.5) 尝试用 SDK 自带的资源管理器下载 AEC 模型（官方设计路径）
-                var fetchedModel: String? = aecModelPath
-                try {
-                    val rm = SpeechResourceManagerGenerator.getInstance()
-                    rm.setAppId(appid)
-                    rm.setEngineName(SpeechEngineDefines.DIALOG_ENGINE)
-                    val ok = rm.initResourceManager(applicationContext, RESOURCE_ID)
-                    log("ResourceManager init = $ok")
-                    for (name in listOf("aec_model", "aec", "volc.speech.dialog.aec")) {
-                        try {
-                            val has = rm.checkResourceDownload(name)
-                            log("  资源 $name 已下载=$has")
-                            if (has) {
-                                val p = rm.getResourcePath(name)
-                                log("  资源路径 $name = $p")
-                                if (!p.isNullOrEmpty() && File(p).exists()) { fetchedModel = p; break }
-                            }
-                        } catch (t: Throwable) { log("  检查 $name 异常: ${t.message}") }
-                    }
-                } catch (t: Throwable) {
-                    log("资源管理器异常: ${t.javaClass.simpleName}: ${t.message}")
-                }
-
+                // 3.5) 资源管理器：本 SDK 版本未实现，跳过（调用会污染内部状态）
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_DIALOG_ADDRESS_STRING, addr)
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_DIALOG_URI_STRING, uri)
                 log("地址: $addr$uri")
                 // 内置 AEC（关键）：既要开录音又要开播放时必须开启；
                 // 但【开启 AEC 时 aec_model_path 必填】，否则 initEngine 返回 -1
-                val aecOn = intent?.getBooleanExtra("aec", false) ?: false
+                // AEC：官方要求"既录音又播放时必须开启"，开启时 aec_model_path 必填。
+                // 默认路径 = 应用文件目录下的 aec.model（adb push 到该路径即可）
+                val extDir = applicationContext.getExternalFilesDir(null) ?: filesDir
+                val defaultModel = java.io.File(extDir, "aec.model").absolutePath
+                val fetchedModel: String? = aecModelPath ?: if (java.io.File(defaultModel).exists()) defaultModel else null
+                val aecOn = intent?.getBooleanExtra("aec", true) ?: true
+                log("AEC 模型: ${fetchedModel ?: "未找到"}")
                 if (aecOn) {
                     e.setOptionBoolean(SpeechEngineDefines.PARAMS_KEY_ENABLE_AEC_BOOL, true)
                     if (!fetchedModel.isNullOrEmpty()) {
@@ -168,7 +154,7 @@ class PocDialogActivity : Activity(), SpeechEngine.SpeechListener {
                 log("initEngine = $ret (0 为成功)")
                 ui.post { status.text = if (ret == 0) "引擎就绪 ✅" else "初始化失败 ret=$ret ❌" }
                 // 自动启动会话（POC 免点击：adb 无法可靠点击自绘按钮）
-                if (ret == 0 && intent?.getBooleanExtra("autoStart", false) == true) {
+                if (ret == 0 && intent?.getBooleanExtra("autoStart", true) == true) {
                     Thread.sleep(1500)
                     log("自动启动会话…")
                     startSession()
@@ -185,11 +171,11 @@ class PocDialogActivity : Activity(), SpeechEngine.SpeechListener {
             val e = engine ?: return@Thread
             try {
                 e.sendDirective(SpeechEngineDefines.DIRECTIVE_SYNC_STOP_ENGINE, "")
-                val ret = e.sendDirective(
-                    SpeechEngineDefines.DIRECTIVE_START_ENGINE,
-                    "{\"dialog\":{\"bot_name\":\"豆包\"}}"
-                )
-                log("START_ENGINE = $ret")
+                // ★★★ 严格按官方 DialogActivity：extra 里必须带 input_mod=keep_alive（全双工监听）
+                //     和 model；缺了会返回 45000001 EmptyRequest
+                val startJson = "{\"dialog\":{\"extra\":{\"input_mod\":\"keep_alive\",\"model\":\"1.2.1.1\"},\"bot_name\":\"豆包\"}}"
+                val ret = e.sendDirective(SpeechEngineDefines.DIRECTIVE_START_ENGINE, startJson)
+                log("START_ENGINE = $ret  payload=$startJson")
                 turns++
             } catch (t: Throwable) {
                 log("启动异常: ${t.message}")
