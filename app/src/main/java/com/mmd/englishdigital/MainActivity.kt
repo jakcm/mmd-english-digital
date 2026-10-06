@@ -460,6 +460,8 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
 
     private var dialogEngine: com.bytedance.speech.speechengine.SpeechEngine? = null
     private var dialogStarted = false
+    /** 最近一次 ASR 转写文本（用于 ASR_ENDED 时兜底 flush final） */
+    private var lastAsrText = ""
 
     private fun creds3(): Triple<String, String, String> {
         val appid = prefs.getString(KEY_APPID, null)?.takeIf { it.isNotBlank() }
@@ -565,17 +567,31 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
             SpeechEngineDefines.MESSAGE_TYPE_DIALOG_ASR_RESPONSE -> {
                 runCatching {
                     val o = org.json.JSONObject(raw)
-                    val txt = o.optJSONArray("results")
-                        ?.optJSONObject(0)?.optString("text").orEmpty()
+                    val r0 = o.optJSONArray("results")?.optJSONObject(0)
+                    val txt = r0?.optString("text").orEmpty()
+                    val extra = o.optJSONObject("extra")
+                    val isInterim = r0?.optBoolean("is_interim", true) ?: true
+                    val endpoint = extra?.optBoolean("endpoint", false) ?: false
+                    // ★ E2：只有「非中间结果 且 服务端判停」才算整句 completed
+                    val isFinal = !isInterim && endpoint
                     if (txt.isNotEmpty()) {
-                        val score = o.optJSONObject("extra")
-                            ?.optDouble("interrupt_score", 0.0) ?: 0.0
-                        Log.i(TAG, "ASR: $txt (interrupt_score=$score aiSpeaking=$aiResponding)")
-                        onUserText(txt, false)
+                        val score = extra?.optDouble("interrupt_score", 0.0) ?: 0.0
+                        Log.i(TAG, "ASR: $txt (isInterim=$isInterim endpoint=$endpoint final=$isFinal " +
+                                "score=$score aiSpeaking=$aiResponding)")
+                        lastAsrText = txt
+                        onUserText(txt, isFinal)
                     }
                 }
             }
-            SpeechEngineDefines.MESSAGE_TYPE_DIALOG_ASR_ENDED -> onAudioDone()
+            SpeechEngineDefines.MESSAGE_TYPE_DIALOG_ASR_ENDED -> {
+                onAudioDone()
+                // 兜底：若 endpoint 未置位导致整句漏判，ASR 结束时补一次 final
+                if (lastAsrText.isNotEmpty()) {
+                    Log.i(TAG, "ASR ended → 兜底 flush final: $lastAsrText")
+                    onUserText(lastAsrText, true)
+                    lastAsrText = ""
+                }
+            }
             SpeechEngineDefines.MESSAGE_TYPE_DIALOG_TTS_SENTENCE_START -> onAudioStarted()
             SpeechEngineDefines.MESSAGE_TYPE_DIALOG_TTS_RESPONSE -> {
                 // ★ 关键：刷新状态机的「AI 有音频」时间戳
@@ -960,7 +976,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
     /** 语音退出判定：整句文本「前 7 个字」内含有"退出"或"关闭"。 */
     private fun isExitCommand(text: String): Boolean {
         val head = text.trim().take(7)
-        return head.contains("退出") || head.contains("关闭")
+        return head.contains("退出") || head.contains("关闭") || head.contains("关机")
     }
 
     /** 执行语音退出：先挂断会话，再结束任务并结束进程（C1 / D1）。 */
