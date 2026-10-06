@@ -73,6 +73,8 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
     private val main = Handler(Looper.getMainLooper())
     private val userBuf = StringBuilder()
     private val aiBuf = StringBuilder()
+    /** 当前句的中间识别结果（未定稿） */
+    private var userCur = ""
     private var callActive = false
     private var receivedAudioBytes = 0L
     private var lastStatus: String = ""
@@ -216,9 +218,14 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
             android.widget.EditText(this).apply {
                 inputType = android.text.InputType.TYPE_CLASS_TEXT
                 if (secret) {
-                    // ★ 机密信息脱敏显示为星号
+                    // ★ 机密信息脱敏：统一显示为星号 *
                     transformationMethod =
-                        android.text.method.PasswordTransformationMethod.getInstance()
+                        object : android.text.method.PasswordTransformationMethod() {
+                            override fun getTransformation(
+                                source: CharSequence,
+                                view: android.view.View?
+                            ): CharSequence = "*".repeat(source.length)
+                        }
                 }
                 this.hint = hint
                 setText(value)
@@ -491,7 +498,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
             promptForKey()
             return
         }
-        userBuf.setLength(0); aiBuf.setLength(0)
+        userBuf.setLength(0); aiBuf.setLength(0); userCur = ""
         aiResponding = false; bargeArmed = false
         render()
         setStatus("初始化引擎…")
@@ -641,7 +648,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
             return
         }
         if (callActive) return
-        userBuf.setLength(0); aiBuf.setLength(0); receivedAudioBytes = 0
+        userBuf.setLength(0); aiBuf.setLength(0); userCur = ""; receivedAudioBytes = 0
         aiResponding = false; bargeArmed = false; dropAudio = false; bargeSilenceSeen = false
         bargeVad?.flush()
         render()
@@ -899,7 +906,10 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
             ev.put("event_id", "event_" + java.util.UUID.randomUUID().toString())
             val session = org.json.JSONObject()
             session.put("id", sessionId ?: "")
+            // ★ 官方 demo 的 session.update 里带 model 与 output_modalities，缺了可能导致配置不生效
+            session.put("model", "1.2.1.1")
             session.put("instructions", SYSTEM_PROMPT)
+            session.put("output_modalities", org.json.JSONArray().put("text").put("audio"))
             ev.put("session", session)
             val r = dialogEngine?.sendDirective(
                 SpeechEngineDefines.DIRECTIVE_SEND_UPLINK_EVENT, ev.toString()
@@ -941,9 +951,15 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
             return
         }
         main.post {
-            userBuf.setLength(0)
-            if (delta.isNotEmpty()) userBuf.append(delta)
-            if (final) userBuf.append("\n")
+            // ★ 用户文本累积：整句完成后才追加到 userBuf（避免中间结果重复）
+            //   中间结果暂存 userCur，render 时作为"当前句"展示
+            if (final) {
+                if (delta.isNotEmpty()) userBuf.append(delta)
+                userBuf.append("\n")
+                userCur = ""
+            } else {
+                userCur = delta
+            }
             render()
         }
     }
@@ -1076,40 +1092,55 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
     private fun render() {
         if (!::bubbleBox.isInitialized) return
         bubbleBox.removeAllViews()
-        val userTurns = userBuf.toString().split("\n").filter { it.isNotBlank() }
+        // 用户：已完成句 + 当前中间结果句
+        val userTurns = (userBuf.toString().split("\n") + userCur)
+            .filter { it.isNotBlank() }
         val aiTurns = aiBuf.toString().split("\n").filter { it.isNotBlank() }
+        // 微信式排列：按时间顺序交替展示（用户/AI 各自出现即当行）
         val n = maxOf(userTurns.size, aiTurns.size)
         for (i in 0 until n) {
             userTurns.getOrNull(i)?.let { addBubble(it, true) }
             aiTurns.getOrNull(i)?.let { addBubble(it, false) }
         }
-        // 自动滚动到最新内容
+        // ★ 自动滚动到最新内容
         scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
     }
 
-    /** 追加一个对话气泡：用户=右对齐/透明背景/白字；AI=左对齐/青绿背景/黑字 */
+    /**
+     * 追加一个对话气泡（微信风格）：
+     * 用户 = 右对齐 / 透明背景 / 白色字体
+     * AI   = 左对齐 / 翠绿色背景 / 黑色字体
+     * 均限最大宽度（78%），超长自动换行
+     */
     private fun addBubble(text: String, isUser: Boolean) {
         val tv = TextView(this)
         tv.text = text
         tv.textSize = 14f
-        tv.setLineSpacing(4f, 1f)
-        val pad = (14 * resources.displayMetrics.density).toInt()
+        tv.setLineSpacing(4f, 1.15f)
+        // ★ 超长自动换行：不限制单行 + 按词/字符断行
+        tv.isSingleLine = false
+        tv.maxLines = Int.MAX_VALUE
+        tv.breakStrategy = android.text.Layout.BREAK_STRATEGY_HIGH_QUALITY
+        tv.hyphenationFrequency = android.text.Layout.HYPHENATION_FREQUENCY_NONE
+        val pad = (12 * resources.displayMetrics.density).toInt()
         tv.setPadding(pad, pad, pad, pad)
         val lp = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         )
-        val margin = (5 * resources.displayMetrics.density).toInt()
+        val margin = (4 * resources.displayMetrics.density).toInt()
         lp.setMargins(margin, margin, margin, margin)
         lp.gravity = if (isUser) Gravity.END else Gravity.START
-        // 限宽，避免长文本铺满整行
+        // ★ 最大宽度限制（微信风格：气泡不铺满整行）
         lp.width = (resources.displayMetrics.widthPixels * 0.78f).toInt()
         if (isUser) {
-            tv.setTextColor(getColor(R.color.text_primary))   // 白色字体
-            tv.setBackgroundResource(R.drawable.bg_bubble_user) // 透明背景
+            tv.setTextColor(getColor(R.color.text_primary))      // 白色字体
+            tv.setBackgroundResource(R.drawable.bg_bubble_user)  // 透明背景
+            tv.textAlignment = android.view.View.TEXT_ALIGNMENT_VIEW_END
         } else {
-            tv.setTextColor(0xFF000000.toInt())               // 黑色字体
-            tv.setBackgroundResource(R.drawable.bg_bubble_ai)   // 青绿色背景
+            tv.setTextColor(0xFF000000.toInt())                  // 黑色字体
+            tv.setBackgroundResource(R.drawable.bg_bubble_ai)    // 翠绿色背景
+            tv.textAlignment = android.view.View.TEXT_ALIGNMENT_VIEW_START
         }
         tv.layoutParams = lp
         bubbleBox.addView(tv)
