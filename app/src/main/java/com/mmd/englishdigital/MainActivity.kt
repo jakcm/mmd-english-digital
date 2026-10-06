@@ -22,8 +22,12 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
+import com.bytedance.speech.speechengine.SpeechEngine
+import com.bytedance.speech.speechengine.SpeechEngineDefines
+import com.bytedance.speech.speechengine.SpeechEngineGenerator
 
-class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
+class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
+    com.bytedance.speech.speechengine.SpeechEngine.SpeechListener {
 
     private lateinit var statusTv: TextView
     private lateinit var transcriptTv: TextView
@@ -200,33 +204,46 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
 
     /** 设置页：填写 / 修改 / 清空 API Key（本地明文保存）。 */
     private fun promptForKey() {
-        val edit = android.widget.EditText(this).apply {
+        val (curA, curK, curT) = creds3()
+        val lp = android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+        fun field(hint: String, value: String) = android.widget.EditText(this).apply {
             inputType = android.text.InputType.TYPE_CLASS_TEXT
-            hint = "X-Api-Key"
-            setText(apiKey())
+            this.hint = hint
+            setText(value)
             setSingleLine(true)
             setTextColor(getColor(R.color.text_primary))
             setHintTextColor(getColor(R.color.text_secondary))
+            layoutParams = lp
         }
+        val e1 = field("App ID", curA)
+        val e2 = field("App Key", curK)
+        val e3 = field("Access Token", curT)
         val pad = (24 * resources.displayMetrics.density).toInt()
-        val wrap = android.widget.FrameLayout(this).apply {
+        val box = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
             setPadding(pad, pad / 2, pad, 0)
-            addView(edit)
+            addView(e1); addView(e2); addView(e3)
         }
         androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("设置实时语音 API Key")
-            .setMessage("填入火山引擎 Seeduplex 的 API Key，仅保存在本机，不写入 APK。")
-            .setView(wrap)
+            .setTitle("设置凭据")
+            .setMessage("旧版鉴权三件套（App ID / App Key / Access Token），仅存本机，不写入 APK。")
+            .setView(box)
             .setPositiveButton("保存") { _, _ ->
-                prefs.edit().putString(PREF_KEY, edit.text.toString().trim()).apply()
+                prefs.edit()
+                    .putString(KEY_APPID, e1.text.toString().trim())
+                    .putString(KEY_APPKEY, e2.text.toString().trim())
+                    .putString(KEY_TOKEN, e3.text.toString().trim())
+                    .apply()
                 refreshKeyStatus()
-                appendSystem(if (apiKey().isEmpty()) "API Key 已清空" else "API Key 已保存")
-                if (apiKey().isNotEmpty()) ensurePermissionThenAutoStart()
+                appendSystem("凭据已保存")
             }
             .setNeutralButton("清空") { _, _ ->
-                prefs.edit().remove(PREF_KEY).apply()
+                prefs.edit().remove(KEY_APPID).remove(KEY_APPKEY).remove(KEY_TOKEN).apply()
                 refreshKeyStatus()
-                appendSystem("API Key 已清空")
+                appendSystem("凭据已清空")
             }
             .setNegativeButton("取消", null)
             .show()
@@ -422,6 +439,146 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
     // ---------- 主流程 ----------
 
     private fun startCall() {
+        if (callActive) return
+        // ★★★ v3.0：统一走官方 SpeechEngine SDK（内置多级 AEC，支持播报中打断）★★★
+        startOfficialDialog()
+    }
+
+    // ---------- 官方 SpeechEngine SDK（v3.0 新引擎；UI/头像沿用原有）----------
+
+    private var dialogEngine: com.bytedance.speech.speechengine.SpeechEngine? = null
+    private var dialogStarted = false
+
+    private fun creds3(): Triple<String, String, String> {
+        val appid = prefs.getString(KEY_APPID, null)?.takeIf { it.isNotBlank() }
+            ?: "2446422829"
+        val appkey = prefs.getString(KEY_APPKEY, null)?.takeIf { it.isNotBlank() }
+            ?: "PlgvMymc7f3tQnJ6"
+        val token = prefs.getString(KEY_TOKEN, "") ?: ""
+        return Triple(appid, appkey, token)
+    }
+
+    private fun startOfficialDialog() {
+        val (appid, appkey, token) = creds3()
+        if (token.isBlank()) {
+            setStatus("⚠️ 请先在设置中填写 Access Token")
+            promptForKey()
+            return
+        }
+        userBuf.setLength(0); aiBuf.setLength(0)
+        aiResponding = false; bargeArmed = false
+        render()
+        setStatus("初始化引擎…")
+        Thread {
+            try {
+                com.bytedance.speech.speechengine.SpeechEngineGenerator
+                    .PrepareEnvironment(applicationContext, application)
+                val e = com.bytedance.speech.speechengine.SpeechEngineGenerator.getInstance()
+                e.createEngine()
+                dialogEngine = e
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_ENGINE_NAME_STRING, SpeechEngineDefines.DIALOG_ENGINE)
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_UID_STRING, "mmd-tv-001")
+                // 旧版鉴权三件套（勿与新版 api_key 混用，混用会 initEngine=-1）
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_ID_STRING, appid)
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_KEY_STRING, appkey)
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_TOKEN_STRING, token)
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_RESOURCE_ID_STRING, "volc.speech.dialog")
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_DIALOG_ADDRESS_STRING, "wss://openspeech.bytedance.com")
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_DIALOG_URI_STRING, "/api/v3/realtime/dialogue")
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_RECORDER_TYPE_STRING, SpeechEngineDefines.RECORDER_TYPE_RECORDER)
+                // 内置 AEC（模型从 assets 释放）
+                val dir = applicationContext.getExternalFilesDir(null) ?: filesDir
+                val model = java.io.File(dir, "aec.model")
+                if (!model.exists()) {
+                    try {
+                        assets.open("testdata/aec/aec.model").use { i ->
+                            model.outputStream().use { o -> i.copyTo(o) }
+                        }
+                    } catch (t: Throwable) { Log.w(TAG, "释放 AEC 模型失败: ${t.message}") }
+                }
+                e.setOptionBoolean(SpeechEngineDefines.PARAMS_KEY_ENABLE_AEC_BOOL, true)
+                if (model.exists()) {
+                    e.setOptionString(SpeechEngineDefines.PARAMS_KEY_AEC_MODEL_PATH_STRING, model.absolutePath)
+                }
+                e.setContext(applicationContext)
+                e.setListener(this)
+                val ret = e.initEngine()
+                Log.i(TAG, "SDK initEngine = $ret")
+                if (ret != 0) {
+                    main.post { setStatus("❌ 引擎初始化失败 ret=$ret") }
+                    return@Thread
+                }
+                e.sendDirective(SpeechEngineDefines.DIRECTIVE_SYNC_STOP_ENGINE, "")
+                val json = """{"dialog":{"extra":{"input_mod":"keep_alive","model":"1.2.1.1"},"bot_name":"豆包"}}"""
+                val r2 = e.sendDirective(SpeechEngineDefines.DIRECTIVE_START_ENGINE, json)
+                Log.i(TAG, "SDK START_ENGINE = $r2")
+                dialogStarted = r2 == 0
+                callActive = dialogStarted
+                main.post {
+                    setStatus(if (dialogStarted) "🎙️ 对话中，直接说话即可" else "❌ 启动失败 ret=$r2")
+                    render()
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "SDK start failed", t)
+                main.post { setStatus("❌ 异常: ${t.message}") }
+            }
+        }.start()
+    }
+
+    /** 官方 SDK 回调 → 复用原有的 UI/字幕/状态更新逻辑 */
+    override fun onSpeechMessage(type: Int, data: ByteArray?, len: Int) {
+        val raw = data?.let { String(it, 0, minOf(len, it.size)) } ?: ""
+        when (type) {
+            SpeechEngineDefines.MESSAGE_TYPE_DIALOG_SESSION_STARTED -> {
+                Log.i(TAG, "会话建立: $raw")
+                val sid = runCatching {
+                    org.json.JSONObject(raw).optString("dialog_id")
+                }.getOrNull()
+                onSessionCreated(sid)
+            }
+            SpeechEngineDefines.MESSAGE_TYPE_DIALOG_ASR_RESPONSE -> {
+                runCatching {
+                    val o = org.json.JSONObject(raw)
+                    val txt = o.optJSONArray("results")
+                        ?.optJSONObject(0)?.optString("text").orEmpty()
+                    if (txt.isNotEmpty()) {
+                        val score = o.optJSONObject("extra")
+                            ?.optDouble("interrupt_score", 0.0) ?: 0.0
+                        Log.i(TAG, "ASR: $txt (interrupt_score=$score aiSpeaking=$aiResponding)")
+                        onUserText(txt, false)
+                    }
+                }
+            }
+            SpeechEngineDefines.MESSAGE_TYPE_DIALOG_ASR_ENDED -> onAudioDone()
+            SpeechEngineDefines.MESSAGE_TYPE_DIALOG_TTS_SENTENCE_START -> onAudioStarted()
+            SpeechEngineDefines.MESSAGE_TYPE_DIALOG_TTS_ENDED -> onAudioDone()
+            SpeechEngineDefines.MESSAGE_TYPE_DIALOG_CHAT_RESPONSE -> {
+                runCatching {
+                    val c = org.json.JSONObject(raw).optString("content")
+                    if (c.isNotEmpty()) onAssistantText(c)
+                }
+            }
+            SpeechEngineDefines.MESSAGE_TYPE_ENGINE_ERROR -> onError(raw)
+            1001 -> main.post { setStatus("✅ 引擎已启动") }
+            1002 -> Log.i(TAG, "引擎停止")
+            else -> Log.d(TAG, "EVT[$type] $raw")
+        }
+    }
+
+    override fun onSpeechLogid(logid: String?) { Log.d(TAG, "logid: $logid") }
+
+    private fun stopOfficialDialog() {
+        try {
+            dialogEngine?.sendDirective(SpeechEngineDefines.DIRECTIVE_SYNC_STOP_ENGINE, "")
+            dialogEngine?.sendDirective(SpeechEngineDefines.DIRECTIVE_STOP_ENGINE, "")
+        } catch (_: Throwable) {
+        }
+        dialogEngine = null
+        dialogStarted = false
+        callActive = false
+    }
+
+    private fun startCallLegacy() {
         val key = apiKey()
         if (key.isEmpty()) {
             toast("请先在设置中填写 API Key")
@@ -551,6 +708,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
     }
 
     private fun hangup() {
+        stopOfficialDialog()        // ★ v3.0：停止官方 SDK 会话
         player?.onRender = null
         capture?.stop(); capture = null
         player?.stop(); player = null
@@ -864,5 +1022,9 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
     companion object {
         const val TAG = "MMD-English"
         const val PREF_KEY = "volc_api_key"
+        // v3.0 官方 SDK 凭据（旧版鉴权三件套；仅本机保存，不写入 APK）
+        const val KEY_APPID = "volc_app_id"
+        const val KEY_APPKEY = "volc_app_key"
+        const val KEY_TOKEN = "volc_app_token"
     }
 }
