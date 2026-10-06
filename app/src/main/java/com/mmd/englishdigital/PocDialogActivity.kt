@@ -187,9 +187,11 @@ class PocDialogActivity : Activity(), SpeechEngine.SpeechListener {
                 e.sendDirective(SpeechEngineDefines.DIRECTIVE_SYNC_STOP_ENGINE, "")
                 // ★★★ 严格按官方 DialogActivity：extra 里必须带 input_mod=keep_alive（全双工监听）
                 //     和 model；缺了会返回 45000001 EmptyRequest
-                val startJson = "{\"dialog\":{\"extra\":{\"input_mod\":\"keep_alive\",\"model\":\"1.2.1.1\"},\"bot_name\":\"豆包\"}}"
+                // 模型版本可由 Intent 覆盖（默认沿用官方 demo 的 1.2.1.1，便于与 1.2.6.1 对照）
+                val modelVer = intent?.getStringExtra("model") ?: "1.2.1.1"
+                val startJson = "{\"dialog\":{\"extra\":{\"input_mod\":\"keep_alive\",\"model\":\"$modelVer\"},\"bot_name\":\"豆包\"}}"
                 val ret = e.sendDirective(SpeechEngineDefines.DIRECTIVE_START_ENGINE, startJson)
-                log("START_ENGINE = $ret  payload=$startJson")
+                log("START_ENGINE model=$modelVer ret=$ret")
                 turns++
             } catch (t: Throwable) {
                 log("启动异常: ${t.message}")

@@ -520,8 +520,8 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                     return@Thread
                 }
                 e.sendDirective(SpeechEngineDefines.DIRECTIVE_SYNC_STOP_ENGINE, "")
-                // 模型版本：Seeduplex 3.0 = 1.2.6.1（官方 demo 默认 1.2.1.1）；可由 Intent 覆盖
-                val modelVer = intent?.getStringExtra("model") ?: "1.2.6.1"
+                // 模型版本：官方 demo 用 1.2.1.1（实测 1.2.6.1 下无 ASR 结果，不可用）
+                val modelVer = intent?.getStringExtra("model") ?: "1.2.1.1"
                 val json = """{"dialog":{"extra":{"input_mod":"keep_alive","model":"$modelVer"},"bot_name":"豆包"}}"""
                 Log.i(TAG, "START_ENGINE payload model=$modelVer")
                 val r2 = e.sendDirective(SpeechEngineDefines.DIRECTIVE_START_ENGINE, json)
