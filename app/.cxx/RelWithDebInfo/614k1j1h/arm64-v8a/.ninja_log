@@ -1,3 +1,9 @@
 # ninja log v5
 0	57	1791281015564412758	CMakeFiles/ten_vad_jni.dir/ten_vad_jni.c.o	3865bbec9f79b345
 58	106	1791281015613413304	/home/ubuntu/project/mmd-english-digital/app/build/intermediates/cxx/RelWithDebInfo/614k1j1h/obj/arm64-v8a/libten_vad_jni.so	e07e9f8eff386a2f
+0	4	0	clean	2d2f43cf2094d251
+1	94	1791301902551578763	CMakeFiles/ten_vad_jni.dir/ten_vad_jni.c.o	3865bbec9f79b345
+94	537	1791301902991583674	/home/ubuntu/project/mmd-english-digital/app/build/intermediates/cxx/RelWithDebInfo/614k1j1h/obj/arm64-v8a/libten_vad_jni.so	e07e9f8eff386a2f
+0	3	0	clean	2d2f43cf2094d251
+0	87	1791302232901265601	CMakeFiles/ten_vad_jni.dir/ten_vad_jni.c.o	3865bbec9f79b345
+88	135	1791302232948266126	/home/ubuntu/project/mmd-english-digital/app/build/intermediates/cxx/RelWithDebInfo/614k1j1h/obj/arm64-v8a/libten_vad_jni.so	e07e9f8eff386a2f

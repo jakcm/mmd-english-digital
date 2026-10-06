@@ -14,8 +14,8 @@ android {
         applicationId = "com.mmd.englishdigital"
         minSdk = 24
         targetSdk = 34
-        versionCode = 22
-        versionName = "4.1"
+        versionCode = 24
+        versionName = "4.3"
         // 只保留目标设备需要的 ABI（电视为 arm64-v8a）。
         // TFLite 运行时自带 4 个 ABI 的原生库；TEN VAD 只有 arm64-v8a 预编译库（532KB）。
         ndk { abiFilters "arm64-v8a" }
