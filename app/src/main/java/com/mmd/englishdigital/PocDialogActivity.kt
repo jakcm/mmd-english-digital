@@ -34,8 +34,10 @@ class PocDialogActivity : Activity(), SpeechEngine.SpeechListener {
     companion object {
         private const val TAG = "MMD-POC"
         private const val RESOURCE_ID = "volc.speech.dialog"
-        private const val ADDRESS = "wss://openspeech.bytedance.com"
-        private const val URI = "/api/v3/duplex/realtime/dialogue"
+        // 官方 iOS SDK 文档示例："wss://openspeech.bytedance.com" + "/api/v3/realtime/dialogue"
+        // 注意：SDK 用的 URI 与 WebSocket 直连（/api/v3/duplex/realtime/dialogue）不同！
+        private const val DEFAULT_ADDRESS = "wss://openspeech.bytedance.com"
+        private const val DEFAULT_URI = "/api/v3/realtime/dialogue"
     }
 
     private var engine: SpeechEngine? = null
@@ -58,7 +60,13 @@ class PocDialogActivity : Activity(), SpeechEngine.SpeechListener {
         val appkey = intent?.getStringExtra("appkey") ?: run {
             Log.e(TAG, "缺少 appkey"); finish(); return
         }
+        // 鉴权模式（可空）：late_bind / pre_bind —— 空则走 SDK 默认（旧版 access_token）
+        val authType = intent?.getStringExtra("authType")
+        val authSecret = intent?.getStringExtra("authSecret") ?: appkey
+        val authCredential = intent?.getStringExtra("authCredential")
         val aecModelPath = intent?.getStringExtra("aecModelPath")
+        val addr = intent?.getStringExtra("addr") ?: DEFAULT_ADDRESS
+        val uri = intent?.getStringExtra("uri") ?: DEFAULT_URI
 
         // 简易 UI：状态 + 滚动日志
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 40, 40, 40) }
@@ -87,8 +95,18 @@ class PocDialogActivity : Activity(), SpeechEngine.SpeechListener {
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_ID_STRING, appid)
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_KEY_STRING, appkey)
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_RESOURCE_ID_STRING, RESOURCE_ID)
-                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_DIALOG_ADDRESS_STRING, ADDRESS)
-                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_DIALOG_URI_STRING, URI)
+                // 鉴权模式：late_bind 走"新版鉴权"（用 API Key），空则走旧版 access_token
+                if (!authType.isNullOrEmpty()) {
+                    e.setOptionString(SpeechEngineDefines.PARAMS_KEY_AUTHENTICATE_TYPE_STRING, authType)
+                    e.setOptionString(SpeechEngineDefines.PARAMS_KEY_AUTHENTICATE_SECRET_STRING, authSecret)
+                    if (!authCredential.isNullOrEmpty()) {
+                        e.setOptionString(SpeechEngineDefines.PARAMS_KEY_AUTHENTICATE_CREDENTIAL, authCredential)
+                    }
+                    log("鉴权模式: type=$authType secret长度=${authSecret.length} credential=${!authCredential.isNullOrEmpty()}")
+                }
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_DIALOG_ADDRESS_STRING, addr)
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_DIALOG_URI_STRING, uri)
+                log("地址: $addr$uri")
                 // 内置 AEC（关键）：既要开录音又要开播放，必须开启
                 e.setOptionBoolean(SpeechEngineDefines.PARAMS_KEY_ENABLE_AEC_BOOL, true)
                 if (!aecModelPath.isNullOrEmpty()) {
