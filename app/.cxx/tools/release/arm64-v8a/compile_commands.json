@@ -1,0 +1,7 @@
+[
+{
+  "directory": "/home/ubuntu/project/mmd-english-digital/app/.cxx/RelWithDebInfo/614k1j1h/arm64-v8a",
+  "command": "/opt/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/clang --target=aarch64-none-linux-android24 --sysroot=/opt/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/sysroot -Dten_vad_jni_EXPORTS -I/home/ubuntu/project/mmd-english-digital/app/src/main/cpp -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O2 -g -DNDEBUG -fPIC -o CMakeFiles/ten_vad_jni.dir/ten_vad_jni.c.o -c /home/ubuntu/project/mmd-english-digital/app/src/main/cpp/ten_vad_jni.c",
+  "file": "/home/ubuntu/project/mmd-english-digital/app/src/main/cpp/ten_vad_jni.c"
+}
+]

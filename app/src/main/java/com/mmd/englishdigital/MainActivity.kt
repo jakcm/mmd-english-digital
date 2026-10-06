@@ -110,7 +110,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        localVad = LocalVad { isSpeech -> controller?.onMonitorSpeech(isSpeech) }
+        localVad = LocalVad { prob -> controller?.onMonitorSpeech(prob > 0.5f) }
         audioSrc = intent?.getIntExtra("src", MediaRecorder.AudioSource.VOICE_COMMUNICATION)
             ?: MediaRecorder.AudioSource.VOICE_COMMUNICATION
         audioUsage = intent?.getIntExtra("usage", AudioAttributes.USAGE_VOICE_COMMUNICATION)
@@ -152,7 +152,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
                 Log.i(TAG, "离线标定录音中 → ${dir.absolutePath}/{mic_raw,mic_clean,far_end}.pcm")
             } catch (e: Exception) { Log.w(TAG, "dump open failed: ${e.message}") }
         }
-        bargeVad = LocalVad { isSpeech -> onBargeVad(isSpeech) }
+        bargeVad = LocalVad { prob -> onBargeVad(prob) }
         controller = AutoCallController(object : AutoCallController.Callbacks {
             override fun requestDial() = startCall()
             override fun requestHangup() = hangup()
@@ -354,7 +354,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
         Thread {
             val pcm = loadAsset("test_input.pcm") ?: return@Thread
             var total = 0; var speech = 0
-            val v = LocalVad { s -> total++; if (s) speech++ }
+            val v = LocalVad { p -> total++; if (p > 0.5f) speech++ }
             v.feed(pcm)
             v.release()
             Log.i(
@@ -540,9 +540,10 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
         // 关键修复：本地 VAD 打断只在硬件 AEC 真正生效时启用；否则回声残留会误判为"用户插话"。
         // [v2.6] 新增 --ez localBarge true：配合新判据（能量门+VAD+时长）在无硬件 AEC 的设备上实验。
         localBargeEnabled = hwAec || (intent?.getBooleanExtra("localBarge", false) == true)
-        bargeRmsThreshold = (intent?.getIntExtra("bargeRms", 300) ?: 300).toDouble()
+        bargeRmsThreshold = (intent?.getIntExtra("bargeRms", 250) ?: 250).toDouble()
         bargeHoldMs = (intent?.getIntExtra("bargeHold", 200) ?: 200).toLong()
-        Log.i(TAG, "software AEC3 = ${aec != null} (hwAecActive=$hwAec, delayMs=$delayMs, playerBufferMs=${player?.bufferMs}, localBarge=$localBargeEnabled, bargeRms=${bargeRmsThreshold.toInt()}, bargeHold=${bargeHoldMs}ms)")
+        bargeProbThr = ((intent?.getIntExtra("bargeProbPct", 40) ?: 40) / 100f)
+        Log.i(TAG, "software AEC3 = ${aec != null} (hwAecActive=$hwAec, delayMs=$delayMs, playerBufferMs=${player?.bufferMs}, localBarge=$localBargeEnabled, bargeProb=${bargeProbThr}, bargeHold=${bargeHoldMs}ms, tenVad=${TenVadNative.isAvailable})")
         if (aec != null) appendSystem("🎧 软件 AEC3 已启用（硬件回声消除未生效）")
 
         callActive = true
@@ -566,43 +567,73 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
     // ---------- 打断 / barge-in ----------
 
     /**
-     * [v2.6] 本地双讲检出（替代原"仅 VAD"判据）。
-     * 判据：AI 正在回复 且 该帧 VAD=语音 且 帧能量 > bargeRmsThreshold 且 连续 ≥ bargeHoldMs。
-     * 依据：VOICE_COMMUNICATION 下 AI 回声被 HAL 压低约 30dB（个位数~几十），
-     *      用户插话时达 400~1800，两者分离度 >25dB，配合能量门即可稳定区分。
+     * [v2.8.2] 本地双讲检出 —— TEN VAD 概率 + 能量门「双信号 AND」，**滑窗占比**判定。
+     *
+     * 演进：
+     *  - v2.6 能量门+VAD+严格连续 → 噪音下误触发
+     *  - v2.8 仅 TEN VAD 概率 → AEC3 输出的全零帧是分布外输入，prob 虚高(0.5~0.6) → 误触发
+     *  - v2.8.1 加回能量门(AND) → 误报消除，但「严格连续 500ms」太苛刻：
+     *           实测真人插话帧为 rms 272~1570 / prob 0.71~0.83，中间任何一帧掉档
+     *           就把连续计数清零 → 永远攒不满 → 不触发
+     *  - v2.8.2 改为滑窗占比：最近 bargeHoldMs 窗口内，满足(prob & rms)的帧占比 ≥60% 即触发
+     *
+     * 依据（真实录音实测）：
+     *   WebRTC VAD：低噪 67% / 中噪 96% 判为"人声" → 噪音必然误触发
+     *   TEN  VAD：低噪 5% / 中噪 17% / 真人语音 87~99%（概率 0.71~0.93）
+     *   能量门：回声 2~27 / 静音 0~62 / 真人插话 272~1570
      */
-    private fun onBargeVad(isSpeech: Boolean) {
+    @Volatile private var bargeProbThr = 0.40f
+    /** 滑窗（帧）与判定占比：容忍说话中的短暂掉档 */
+    private val bargeWin = ArrayDeque<Boolean>()
+    private val BARGE_WIN_RATIO = 0.60f
+
+    private fun onBargeVad(prob: Float) {
         if (!callActive) return
-        // 诊断日志：AI 播报期间每秒记录一次帧能量与 VAD（用于计算误报/检出率）
+        // [v2.9] 无论本地打断是否开启，都刷新 VAD 闸门状态（供服务端事件做防噪确认）
+        refreshVadGate(prob)
+        // 诊断日志：AI 播报期间定期记录概率与能量（用于离线核算误报/检出率）
         if (aiResponding) {
             bargeDbg++
-            if (bargeDbg % 50L == 0L) Log.i(TAG, "BARGE-PROBE rms=${lastFrameRms.toInt()} vad=$isSpeech run=${bargeRunMs}ms")
+            if (bargeDbg % 60L == 0L) Log.i(TAG, "BARGE-PROBE prob=%.2f rms=%d run=%dms".format(prob, lastFrameRms.toInt(), bargeRunMs))
         }
         if (!localBargeEnabled) return
-        if (!aiResponding || bargeArmed) { bargeRunMs = 0; return }
-        val voiced = isSpeech && lastFrameRms > bargeRmsThreshold
-        bargeRunMs = if (voiced) bargeRunMs + 20 else 0
-        if (bargeRunMs < bargeHoldMs) return
-        // 连续满足 → 判定用户插话，立即打断
+        if (!aiResponding || bargeArmed) { bargeWin.clear(); bargeRunMs = 0; return }
+        val voiced = prob > bargeProbThr && lastFrameRms > bargeRmsThreshold
+        // 滑窗（窗口长度 = bargeHoldMs，帧长 16ms）
+        val winFrames = (bargeHoldMs / 16L).toInt().coerceAtLeast(1)
+        bargeWin.addLast(voiced)
+        while (bargeWin.size > winFrames) bargeWin.removeFirst()
+        val hitRatio = bargeWin.count { it }.toFloat() / bargeWin.size
+        bargeRunMs = (hitRatio * winFrames * 16).toLong()
+        if (bargeWin.size < winFrames || hitRatio < BARGE_WIN_RATIO) return
+        // 窗口内足够比例满足 → 判定用户插话，立即打断
         bargeArmed = true
         dropAudio = true
         aiResponding = false
         player?.interrupt()
         aec?.clearRender()
         client?.sendCancel()
-        main.post { appendSystem("⏹ 本地双讲检出（能量 ${lastFrameRms.toInt()} ≥ ${bargeRmsThreshold.toInt()}，连续 ${bargeRunMs}ms）→ 打断 AI 播报") }
-        Log.i(TAG, "BARGE-HIT rms=${lastFrameRms.toInt()} run=${bargeRunMs}ms")
+        val pct = (hitRatio * 100).toInt()
+        main.post { appendSystem("⏹ 本地双讲检出（TEN VAD %.2f ≥ %.2f，能量 %d ≥ %d，${winFrames * 16}ms 内占比 %d%% ≥ 60%%）→ 打断 AI 播报".format(prob, bargeProbThr, lastFrameRms.toInt(), bargeRmsThreshold.toInt(), pct)) }
+        Log.i(TAG, "BARGE-HIT prob=%.2f rms=%d ratio=%d%% win=%dms".format(prob, lastFrameRms.toInt(), pct, winFrames * 16))
     }
 
-    /** 服务端已检测到用户开口：立即清空本地播放缓冲（与官方网页一致）。 */
+    /** 服务端已检测到用户开口：立即停止播报并取消当前回复。 */
     private fun onServerBarge() {
         if (!callActive || !aiResponding) return
+        // [v2.9] 防噪闸门：本地 TEN VAD 未确认人声时（噪音/幻听），不打断
+        if (!recentVadVoiced) {
+            Log.i(TAG, "SERVER-BARGE 被本地 VAD 闸门拦截（服务端报开口但本地判非人声）")
+            return
+        }
         bargeArmed = true
         dropAudio = true
         aiResponding = false
         player?.interrupt()
         aec?.clearRender()
-        main.post { appendSystem("⏹ 服务端检出用户开口 → 停止播报，进入下一轮") }
+        client?.sendCancel()   // [v2.8.4] 之前漏了这句：只停本地播放，服务端仍在生成 → AI 会把整轮说完
+        main.post { appendSystem("⏹ 服务端检出用户开口 + 本地VAD确认 → 停止播报，进入下一轮") }
+        Log.i(TAG, "SERVER-BARGE 服务端检出用户开口 → 停止播报")
     }
 
     /** 无麦克风环境下的测试通道：把内置 PCM 按 20ms 节奏喂给模型。 */
@@ -652,11 +683,26 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
         }
     }
 
+    /**
+     * [v2.9] 双讲判据：aiResponding 期间服务端产生转写 = 用户在说话 → 直接打断。
+     *
+     * 依据：上行已反复验证为"干净"（AI 回声不会进入转写，只有用户的话），
+     * 故 aiResponding 期间任何转写内容都来自真人 → 即双讲，无需判关键词。
+     * 防噪闸门：本地 TEN VAD 概率（实测噪音下仅 5~17% 判语音，真人 87~99%），
+     * 避免服务端 ASR 对噪音"幻听"出文字时误触发。
+     */
     override fun onUserText(delta: String, final: Boolean) {
         controller?.onUserActivity()
-        // 关键词打断（服务端增量转写；前 6 字命中"停/不对"即视为用户打断）
-        // A2：叠加在既有打断（本地 VAD / 服务端 started）之上，作为"精确打断"补充。
-        if (isBargeCommand(delta)) onKeywordBarge()
+        if (delta.isNotEmpty()) {
+            bargeHeadBuf.append(delta)
+            // 双讲判定：AI 正在回复 + 服务端产出转写 + 本地 VAD 确认是人声
+            if (aiResponding && !bargeArmed && recentVadVoiced) {
+                main.post { appendSystem("⏹ 双讲检出（AI 播报中收到上行转写「${delta.take(12)}」+ 本地VAD确认）→ 打断") }
+                Log.i(TAG, "DOUBLETALK-BARGE delta=「${delta.take(12)}」")
+                onKeywordBarge()
+            }
+        }
+        if (final) bargeHeadBuf.setLength(0)
         // 退出指令：整句、前 7 字内含"退出/关闭"
         if (final && isExitCommand(delta)) {
             main.post { exitByVoice() }
@@ -670,28 +716,56 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
         }
     }
 
+    /** 本地 TEN VAD 近期是否确认"有人在说话"（用于给服务端事件做防噪闸门） */
+    @Volatile private var recentVadVoiced = false
+    @Volatile private var lastVadVoicedAt = 0L
+
+    /** 刷新本地 VAD 闸门状态（在 onBargeVad 中调用） */
+    private fun refreshVadGate(prob: Float) {
+        if (prob > 0.40f) {
+            recentVadVoiced = true
+            lastVadVoicedAt = System.currentTimeMillis()
+        } else if (System.currentTimeMillis() - lastVadVoicedAt > 1500L) {
+            // 1.5 秒内没有再次确认人声 → 闸门关闭（防噪）
+            recentVadVoiced = false
+        }
+    }
+
+    /** 本轮累积的上行转写文本（用于关键词判定，避免 delta 分块漏检） */
+    private val bargeHeadBuf = StringBuilder()
+
     /**
-     * 关键词打断判定（服务端转写文本，仅看前 3 个字）：
-     * 命中「停」或「不对」即视为用户想插话——
-     * 「停」已覆盖 停止/暂停/停下/停一下（暂停、停下、停一下 的前 3 字里都含"停"）。
-     * 用增量(delta)即可判定，无需等整句 completed，保证打断及时。
+     * 关键词打断判定（本轮累积转写文本，仅看前 4 个字）：
+     * 命中「停」或「不对」或「等等」或「别说」即视为用户想插话——
+     * 「停」已覆盖 停止/暂停/停下/停一下（这些词的前 3 字里都含"停"）。
+     * 用增量(delta)累积即可判定，无需等整句 completed，保证打断及时。
      */
     private fun isBargeCommand(text: String): Boolean {
-        val head = text.trim().take(3)
-        val hit = head.contains("停") || head.contains("不对")
+        val head = text.trim().take(4)
+        val hit = head.contains("停") || head.contains("不对") ||
+                  head.contains("等等") || head.contains("别说")
         if (hit) Log.i(TAG, "关键词命中: head=「$head」 aiResponding=$aiResponding callActive=$callActive")
         return hit
     }
 
-    /** 关键词打断：立即停播 + 取消当前回复，进入下一轮。 */
+    /**
+     * 关键词打断：立即停播 + 取消当前回复，进入下一轮。
+     * [v2.8.4] 修复：不再要求 aiResponding=true。
+     *   原因：ASR 流式转写比用户实际说话晚 ~1s，届时 AI 那轮回复可能已播完
+     *   （aiResponding 已被 onAudioDone 置 false）→ 关键词被自己的门槛挡掉。
+     *   关键词代表用户明确意图，只要通话中命中即执行打断（bargeArmed 保证幂等）。
+     */
     private fun onKeywordBarge() {
-        if (!callActive || !aiResponding || bargeArmed) return
+        if (!callActive || bargeArmed) return
+        val wasResponding = aiResponding
         bargeArmed = true
         dropAudio = true
         aiResponding = false
         player?.interrupt()
-        client?.sendCancel()
-        main.post { appendSystem("⏹ 关键词打断（停/不对）→ 停止播报，进入下一轮") }
+        aec?.clearRender()
+        client?.sendCancel()   // 同时取消服务端侧回复，避免"停了又继续"
+        main.post { appendSystem("⏹ 关键词打断（停/不对）→ 停止播报，进入下一轮（当时AI${if (wasResponding) "正在" else "已结束"}播报）") }
+        Log.i(TAG, "KEYWORD-BARGE 关键词打断 wasResponding=$wasResponding")
     }
 
     /** 语音退出判定：整句文本「前 7 个字」内含有"退出"或"关闭"。 */

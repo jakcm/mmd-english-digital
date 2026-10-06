@@ -1,0 +1,40 @@
+{
+  "buildFiles": [
+    "/home/ubuntu/project/mmd-english-digital/app/src/main/cpp/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/opt/android-sdk/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/home/ubuntu/project/mmd-english-digital/app/.cxx/RelWithDebInfo/614k1j1h/arm64-v8a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/opt/android-sdk/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/home/ubuntu/project/mmd-english-digital/app/.cxx/RelWithDebInfo/614k1j1h/arm64-v8a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "ten_vad_jni::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "arm64-v8a",
+      "artifactName": "ten_vad_jni",
+      "output": "/home/ubuntu/project/mmd-english-digital/app/build/intermediates/cxx/RelWithDebInfo/614k1j1h/obj/arm64-v8a/libten_vad_jni.so",
+      "runtimeFiles": [
+        "/home/ubuntu/project/mmd-english-digital/app/src/main/jniLibs/arm64-v8a/libten_vad.so"
+      ]
+    }
+  },
+  "toolchains": {
+    "toolchain": {
+      "cCompilerExecutable": "/opt/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/clang.lld",
+      "cppCompilerExecutable": "/opt/android-sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++.lld"
+    }
+  },
+  "cFileExtensions": [
+    "c"
+  ],
+  "cppFileExtensions": []
+}

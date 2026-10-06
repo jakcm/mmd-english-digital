@@ -1,0 +1,1 @@
+/home/ubuntu/project/mmd-english-digital/app/src/main/cpp/CMakeLists.txt

@@ -14,11 +14,23 @@ android {
         applicationId = "com.mmd.englishdigital"
         minSdk = 24
         targetSdk = 34
-        versionCode = 7
-        versionName = "2.7"
-        // 只保留目标设备需要的 ABI（电视为 arm64-v8a；x86_64 供模拟器冒烟）。
-        // TFLite 运行时自带 4 个 ABI 的原生库，若不限制会把 APK 撑大 ~12MB。
-        ndk { abiFilters "arm64-v8a", "x86_64" }
+        versionCode = 13
+        versionName = "2.9"
+        // 只保留目标设备需要的 ABI（电视为 arm64-v8a）。
+        // TFLite 运行时自带 4 个 ABI 的原生库；TEN VAD 只有 arm64-v8a 预编译库（532KB）。
+        ndk { abiFilters "arm64-v8a" }
+        externalNativeBuild {
+            cmake {
+                // TEN VAD 的 JNI 桥
+                cppFlags ""
+            }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     buildTypes {
