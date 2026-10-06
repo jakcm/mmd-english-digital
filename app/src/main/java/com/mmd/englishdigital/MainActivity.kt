@@ -565,6 +565,11 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
             }
             SpeechEngineDefines.MESSAGE_TYPE_DIALOG_ASR_ENDED -> onAudioDone()
             SpeechEngineDefines.MESSAGE_TYPE_DIALOG_TTS_SENTENCE_START -> onAudioStarted()
+            SpeechEngineDefines.MESSAGE_TYPE_DIALOG_TTS_RESPONSE -> {
+                // ★ 关键：刷新状态机的「AI 有音频」时间戳
+                //   否则 AI 播报期间 lastAiAudio 不更新 → 被误判"静默超时"而错误挂断
+                controller?.onAiAudio()
+            }
             SpeechEngineDefines.MESSAGE_TYPE_DIALOG_TTS_ENDED -> onAudioDone()
             SpeechEngineDefines.MESSAGE_TYPE_DIALOG_CHAT_RESPONSE -> {
                 runCatching {
