@@ -294,30 +294,19 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
     }
 
     private fun updateCallUi() {
-        val monitoring = controller?.state == AutoCallController.State.MONITORING
-        when {
-            callActive -> {
-                // 通话中：红色挂断键
-                btnCall.setImageResource(R.drawable.ic_call_end)
-                btnCall.setBackgroundResource(R.drawable.bg_btn_ghost)
-                btnCall.imageTintList =
-                    android.content.res.ColorStateList.valueOf(getColor(R.color.danger))
-            }
-            monitoring -> {
-                // ★ 待机监听中：绿色拨号键 + 呼吸态（表示"说话即可接通"）
-                btnCall.setImageResource(R.drawable.ic_phone)
-                btnCall.setBackgroundResource(R.drawable.bg_btn_primary)
-                btnCall.imageTintList =
-                    android.content.res.ColorStateList.valueOf(getColor(R.color.bg_top))
-                btnCall.alpha = 0.55f
-            }
-            else -> {
-                btnCall.setImageResource(R.drawable.ic_phone)
-                btnCall.setBackgroundResource(R.drawable.bg_btn_primary)
-                btnCall.imageTintList =
-                    android.content.res.ColorStateList.valueOf(getColor(R.color.bg_top))
-                btnCall.alpha = 1f
-            }
+        if (callActive) {
+            // 通话中：红色挂断键
+            btnCall.setImageResource(R.drawable.ic_call_end)
+            btnCall.setBackgroundResource(R.drawable.bg_btn_ghost)
+            btnCall.imageTintList =
+                android.content.res.ColorStateList.valueOf(getColor(R.color.danger))
+        } else {
+            // 待机 / 监听中 / 可拨号：绿色通话键
+            btnCall.setImageResource(R.drawable.ic_phone)
+            btnCall.setBackgroundResource(R.drawable.bg_btn_primary)
+            btnCall.imageTintList =
+                android.content.res.ColorStateList.valueOf(getColor(R.color.bg_top))
+            btnCall.alpha = 1f
         }
     }
 
@@ -544,6 +533,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                 callActive = dialogStarted
                 main.post {
                     setStatus(if (dialogStarted) "🎙️ 对话中，直接说话即可" else "❌ 启动失败 ret=$r2")
+                    updateCallUi()   // ★ 根因修复：原来这里只 render()，按钮从不刷新 → 永不变红
                     render()
                 }
             } catch (t: Throwable) {
