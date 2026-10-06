@@ -544,14 +544,37 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                     main.post { setStatus("❌ 引擎初始化失败 ret=$ret") }
                     return@Thread
                 }
-                // ★ 不再调用 SYNC_STOP_ENGINE：官方 demo 那里传的是 buildSessionClose() 的 JSON，
-                //   传空串会导致引擎状态异常，进而 START_ENGINE 返回 -700。
-                //   initEngine 后引擎本就是空闲状态，直接 START_ENGINE 即可。
-                // 模型版本：官方 demo 用 1.2.1.1（实测 1.2.6.1 下无 ASR 结果，不可用）
+                // ★ v4.8：还原 SYNC_STOP_ENGINE，但必须传 session.close 的 JSON（传空串会导致 -700）
+                //          官方 demo: sendDirective(SYNC_STOP_ENGINE, buildSessionClose())
+                e.sendDirective(
+                    SpeechEngineDefines.DIRECTIVE_SYNC_STOP_ENGINE,
+                    """{"type":"session.close","event_id":"event_close"}"""
+                )
+                // ★ 模型版本：官方 demo 用 1.2.1.1（1.2.6.1 服务端 Unauthorized）
                 val modelVer = intent?.getStringExtra("model") ?: "1.2.1.1"
-                val json = """{"dialog":{"extra":{"input_mod":"keep_alive","model":"$modelVer"},"bot_name":"豆包"}}"""
-                Log.i(TAG, "START_ENGINE payload model=$modelVer")
-                val r2 = e.sendDirective(SpeechEngineDefines.DIRECTIVE_START_ENGINE, json)
+                // ★ 用 session.create 事件承载 instructions（与 V2.X 生效版本一致）
+                //   仅传 {"dialog":{...}} 时 instructions 无法下发 → 提示词不生效
+                val sessionObj = org.json.JSONObject()
+                    .put("model", modelVer)
+                    .put("instructions", SYSTEM_PROMPT)
+                    .put("tools", org.json.JSONArray())
+                    .put(
+                        "audio", org.json.JSONObject()
+                            .put("input", org.json.JSONObject()
+                                .put("format", org.json.JSONObject().put("type", "pcm").put("rate", 16000)))
+                            .put("output", org.json.JSONObject()
+                                .put("format", org.json.JSONObject().put("type", "pcm_s16le").put("rate", 24000)))
+                    )
+                val createJson = org.json.JSONObject()
+                    .put("type", "session.create")
+                    .put("event_id", java.util.UUID.randomUUID().toString())
+                    .put("session", sessionObj)
+                    .put("extension", org.json.JSONObject()
+                        .put("extra", org.json.JSONObject().put("enable_proactive_speak", false))
+                        .put("dialog", org.json.JSONObject().put("extra", org.json.JSONObject())))
+                    .toString()
+                Log.i(TAG, "START_ENGINE payload model=$modelVer instructionsLen=${SYSTEM_PROMPT.length}")
+                val r2 = e.sendDirective(SpeechEngineDefines.DIRECTIVE_START_ENGINE, createJson)
                 Log.i(TAG, "SDK START_ENGINE = $r2")
                 dialogStarted = r2 == 0
                 // ★ 注意：callActive 不在此处置位！START_ENGINE 只是"指令被接受"，
