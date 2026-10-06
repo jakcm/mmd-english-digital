@@ -167,9 +167,12 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
 
         applyLayout()
 
-        if (apiKey().isEmpty()) {
+        // ★ 只检查官方 SDK 的三件套凭据（不再用旧链路的 apiKey()，否则会误弹设置框）
+        val (cid, ckey, ctoken) = creds3()
+        val hasCreds = cid.isNotBlank() && ckey.isNotBlank() && ctoken.isNotBlank()
+        if (!hasCreds) {
             refreshKeyStatus()
-            promptForKey()               // 首次启动：先让用户填写 API Key
+            promptForKey()               // 首次启动：先让用户填写凭据
         } else {
             refreshKeyStatus()
             ensurePermissionThenAutoStart()
@@ -534,7 +537,9 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                     main.post { setStatus("❌ 引擎初始化失败 ret=$ret") }
                     return@Thread
                 }
-                e.sendDirective(SpeechEngineDefines.DIRECTIVE_SYNC_STOP_ENGINE, "")
+                // ★ 不再调用 SYNC_STOP_ENGINE：官方 demo 那里传的是 buildSessionClose() 的 JSON，
+                //   传空串会导致引擎状态异常，进而 START_ENGINE 返回 -700。
+                //   initEngine 后引擎本就是空闲状态，直接 START_ENGINE 即可。
                 // 模型版本：官方 demo 用 1.2.1.1（实测 1.2.6.1 下无 ASR 结果，不可用）
                 val modelVer = intent?.getStringExtra("model") ?: "1.2.1.1"
                 val json = """{"dialog":{"extra":{"input_mod":"keep_alive","model":"$modelVer"},"bot_name":"豆包"}}"""
