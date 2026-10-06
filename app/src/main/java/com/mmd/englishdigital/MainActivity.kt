@@ -504,7 +504,10 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                 // 旧版鉴权三件套（勿与新版 api_key 混用，混用会 initEngine=-1）
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_ID_STRING, appid)
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_KEY_STRING, appkey)
-                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_TOKEN_STRING, token)
+                // ★ Token 必须带固定前缀 "Bearer;"（官方文档要求）；用户填的是原始值，此处补齐
+                val tokenBearer = if (token.startsWith("Bearer;")) token else "Bearer;$token"
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_TOKEN_STRING, tokenBearer)
+                Log.i(TAG, "token 加前缀后长度=${tokenBearer.length}（原=${token.length}）")
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_RESOURCE_ID_STRING, "volc.speech.dialog")
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_DIALOG_ADDRESS_STRING, "wss://openspeech.bytedance.com")
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_DIALOG_URI_STRING, "/api/v3/realtime/dialogue")
