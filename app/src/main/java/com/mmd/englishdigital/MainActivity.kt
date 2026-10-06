@@ -35,10 +35,8 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
     private lateinit var bubbleBox: LinearLayout
     private lateinit var scroll: ScrollView
     private lateinit var btnCall: ImageButton
-    private lateinit var btnTest: ImageButton
-    private lateinit var btnRotate: ImageButton
+    private lateinit var btnClose: ImageButton
     private lateinit var btnSettings: ImageButton
-    private lateinit var swAuto: Switch
     private lateinit var avatarView: TextureView
 
     private var client: SeeduplexClient? = null
@@ -211,27 +209,43 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
             android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
             android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
         )
-        fun field(hint: String, value: String) = android.widget.EditText(this).apply {
-            inputType = android.text.InputType.TYPE_CLASS_TEXT
-            this.hint = hint
-            setText(value)
-            setSingleLine(true)
+        fun field(hint: String, value: String, secret: Boolean = false) =
+            android.widget.EditText(this).apply {
+                inputType = android.text.InputType.TYPE_CLASS_TEXT
+                if (secret) {
+                    // ★ 机密信息脱敏显示为星号
+                    transformationMethod =
+                        android.text.method.PasswordTransformationMethod.getInstance()
+                }
+                this.hint = hint
+                setText(value)
+                setSingleLine(true)
+                setTextColor(getColor(R.color.text_primary))
+                setHintTextColor(getColor(R.color.text_secondary))
+                layoutParams = lp
+            }
+        val e1 = field("App ID", curA, secret = true)
+        val e2 = field("App Key", curK, secret = true)
+        val e3 = field("Access Token", curT, secret = true)
+
+        // ★ 自动模式开关（从主界面移入设置）
+        val swAutoDlg = android.widget.Switch(this).apply {
+            text = "自动模式（静默 10s 挂断 / 说话即重拨）"
+            textSize = 14f
             setTextColor(getColor(R.color.text_primary))
-            setHintTextColor(getColor(R.color.text_secondary))
+            isChecked = controller?.enabled ?: true
             layoutParams = lp
         }
-        val e1 = field("App ID", curA)
-        val e2 = field("App Key", curK)
-        val e3 = field("Access Token", curT)
+
         val pad = (24 * resources.displayMetrics.density).toInt()
         val box = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(pad, pad / 2, pad, 0)
-            addView(e1); addView(e2); addView(e3)
+            addView(e1); addView(e2); addView(e3); addView(swAutoDlg)
         }
         androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("设置凭据")
-            .setMessage("旧版鉴权三件套（App ID / App Key / Access Token），仅存本机，不写入 APK。")
+            .setTitle("设置")
+            .setMessage("凭据仅存本机，不写入 APK（显示为星号）。")
             .setView(box)
             .setPositiveButton("保存") { _, _ ->
                 prefs.edit()
@@ -239,8 +253,10 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                     .putString(KEY_APPKEY, e2.text.toString().trim())
                     .putString(KEY_TOKEN, e3.text.toString().trim())
                     .apply()
+                controller?.enabled = swAutoDlg.isChecked
+                appendSystem(if (swAutoDlg.isChecked) "自动模式：开" else "自动模式：关（回到手动）")
                 refreshKeyStatus()
-                appendSystem("凭据已保存")
+                appendSystem("设置已保存")
             }
             .setNeutralButton("清空") { _, _ ->
                 prefs.edit().remove(KEY_APPID).remove(KEY_APPKEY).remove(KEY_TOKEN).apply()
@@ -260,22 +276,13 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         bubbleBox = findViewById(R.id.bubbleBox)
         scroll = findViewById(R.id.scroll)
         btnCall = findViewById(R.id.btnCall)
-        btnTest = findViewById(R.id.btnTest)
-        btnRotate = findViewById(R.id.btnRotate)
+        btnClose = findViewById(R.id.btnClose)
         btnSettings = findViewById(R.id.btnSettings)
-        swAuto = findViewById(R.id.swAuto)
         avatarView = findViewById(R.id.avatarView)
 
         btnCall.setOnClickListener { if (callActive) hangup() else startCall() }
-        btnTest.setOnClickListener { feedTestAudio() }
-        btnRotate.setOnClickListener { toggleOrientation() }
+        btnClose.setOnClickListener { exitApp() }
         btnSettings.setOnClickListener { promptForKey() }
-
-        swAuto.isChecked = controller?.enabled ?: true
-        swAuto.setOnCheckedChangeListener { _, checked ->
-            controller?.enabled = checked
-            if (checked) appendSystem("自动模式：开") else appendSystem("自动模式：关（回到手动）")
-        }
 
         updateCallUi()
         render()
@@ -992,6 +999,17 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
     }
 
     /** 执行语音退出：先挂断会话，再结束任务并结束进程（C1 / D1）。 */
+    /** 关闭按钮：与语音退出同链路（挂断 → finishAndRemoveTask → killProcess） */
+    private fun exitApp() {
+        Log.i(TAG, "关闭按钮 → 退出应用")
+        try { appendSystem("⏹ 正在关闭…") } catch (_: Exception) {}
+        controller?.release()
+        try { if (callActive) hangup() } catch (_: Exception) {}
+        stopMonitoring()
+        finishAndRemoveTask()
+        android.os.Process.killProcess(android.os.Process.myPid())
+    }
+
     private fun exitByVoice() {
         Log.i(TAG, "语音退出指令命中 → 退出应用")
         try { appendSystem("⏹ 收到退出指令，正在退出…") } catch (_: Exception) {}
