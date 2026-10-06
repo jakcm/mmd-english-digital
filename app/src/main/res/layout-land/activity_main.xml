@@ -1,64 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 横屏：左右结构 —— 左侧数字人头像，右侧内容区 + 按钮 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
+    android:orientation="horizontal"
     android:background="@drawable/bg_root"
     android:fitsSystemWindows="true"
     android:padding="20dp">
 
-    <!-- 顶栏：品牌 + 旋转 -->
+    <!-- ============ 左：数字人头像 ============ -->
     <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical">
-
-        <TextView
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="@string/app_name"
-            android:textColor="@color/text_secondary"
-            android:textSize="13sp"
-            android:letterSpacing="0.12"
-            android:textAllCaps="true" />
-
-        <ImageButton
-            android:id="@+id/btnSettings"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
-            android:layout_marginEnd="8dp"
-            android:background="@drawable/bg_icon_ghost"
-            android:src="@drawable/ic_settings"
-            android:scaleType="centerInside"
-            android:padding="9dp"
-            android:tint="@color/text_secondary"
-            android:contentDescription="@string/settings" />
-
-        <ImageButton
-            android:id="@+id/btnClose"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
-            android:background="@drawable/bg_icon_ghost"
-            android:src="@drawable/ic_close"
-            android:scaleType="centerInside"
-            android:padding="9dp"
-            android:tint="@color/text_secondary"
-            android:contentDescription="@string/close_app" />
-    </LinearLayout>
-
-    <!-- 数字人头像 -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
         android:layout_weight="1"
         android:orientation="vertical"
         android:gravity="center">
 
         <FrameLayout
-            android:layout_width="220dp"
-            android:layout_height="220dp"
+            android:layout_width="240dp"
+            android:layout_height="240dp"
             android:background="@drawable/bg_avatar_ring"
             android:clipToOutline="true">
 
@@ -74,7 +34,7 @@
             android:layout_marginTop="18dp"
             android:text="@string/avatar_name"
             android:textColor="@color/text_primary"
-            android:textSize="20sp"
+            android:textSize="22sp"
             android:textStyle="bold"
             android:letterSpacing="0.03" />
 
@@ -87,18 +47,61 @@
             android:textSize="12sp" />
     </LinearLayout>
 
-    <!-- 状态 + 自动开关 -->
+    <!-- ============ 右：内容区 + 按钮 ============ -->
     <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical">
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1"
+        android:layout_marginStart="24dp"
+        android:orientation="vertical">
 
+        <!-- 顶栏：品牌 + 设置 + 关闭 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/app_name"
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp"
+                android:letterSpacing="0.12"
+                android:textAllCaps="true" />
+
+            <ImageButton
+                android:id="@+id/btnSettings"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_marginEnd="8dp"
+                android:background="@drawable/bg_icon_ghost"
+                android:src="@drawable/ic_settings"
+                android:scaleType="centerInside"
+                android:padding="9dp"
+                android:tint="@color/text_secondary"
+                android:contentDescription="@string/settings" />
+
+            <ImageButton
+                android:id="@+id/btnClose"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:background="@drawable/bg_icon_ghost"
+                android:src="@drawable/ic_close"
+                android:scaleType="centerInside"
+                android:padding="9dp"
+                android:tint="@color/text_secondary"
+                android:contentDescription="@string/close_app" />
+        </LinearLayout>
+
+        <!-- 状态条 -->
         <TextView
             android:id="@+id/status"
-            android:layout_width="0dp"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
+            android:layout_marginTop="10dp"
             android:background="@drawable/bg_pill"
             android:paddingStart="14dp"
             android:paddingEnd="14dp"
@@ -108,47 +111,48 @@
             android:textColor="@color/accent"
             android:textSize="13sp"
             android:maxLines="2" />
-    </LinearLayout>
 
-    <!-- 字幕 -->
-    <FrameLayout
-        android:layout_width="match_parent"
-        android:layout_height="110dp"
-        android:layout_marginTop="12dp"
-        android:background="@drawable/bg_card">
-
-        <ScrollView
-            android:id="@+id/scroll"
+        <!-- 对话气泡区（占满剩余空间） -->
+        <FrameLayout
             android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:padding="14dp">
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_card">
 
-            <LinearLayout
-                android:id="@+id/bubbleBox"
+            <ScrollView
+                android:id="@+id/scroll"
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical" />
-        </ScrollView>
-    </FrameLayout>
+                android:layout_height="match_parent"
+                android:padding="14dp">
 
-    <!-- 控制 -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
-        android:orientation="horizontal"
-        android:gravity="center">
+                <LinearLayout
+                    android:id="@+id/bubbleBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+            </ScrollView>
+        </FrameLayout>
 
-        <ImageButton
-            android:id="@+id/btnCall"
-            android:layout_width="64dp"
-            android:layout_height="64dp"
-            android:background="@drawable/bg_btn_primary"
-            android:src="@drawable/ic_phone"
-            android:scaleType="centerInside"
-            android:padding="18dp"
-            android:tint="@color/bg_top"
-            android:contentDescription="@string/btn_call" />
+        <!-- 通话键 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:orientation="horizontal"
+            android:gravity="center">
+
+            <ImageButton
+                android:id="@+id/btnCall"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:background="@drawable/bg_btn_primary"
+                android:src="@drawable/ic_phone"
+                android:scaleType="centerInside"
+                android:padding="18dp"
+                android:tint="@color/bg_top"
+                android:contentDescription="@string/btn_call" />
+        </LinearLayout>
     </LinearLayout>
 
 </LinearLayout>
