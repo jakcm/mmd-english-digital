@@ -81,6 +81,7 @@ class SeeduplexClient(
         val session = JSONObject()
             .put("model", MODEL)
             .put("instructions", instructions)
+            .put("tools", org.json.JSONArray())
             .put(
                 "audio", JSONObject()
                     .put(
@@ -97,10 +98,15 @@ class SeeduplexClient(
                             .put("voice", voice)
                     )
             )
+        // 官方 demo 同款 extension 字段（对齐参数；enable_proactive_speak 可能影响服务端判停/主动说话行为）
+        val extension = JSONObject()
+            .put("extra", JSONObject().put("enable_proactive_speak", false))
+            .put("dialog", JSONObject().put("extra", JSONObject()))
         return JSONObject()
             .put("type", "session.create")
             .put("event_id", UUID.randomUUID().toString())
             .put("session", session)
+            .put("extension", extension)
             .toString()
     }
 

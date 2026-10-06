@@ -14,8 +14,11 @@ android {
         applicationId = "com.mmd.englishdigital"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 7
+        versionName = "2.7"
+        // 只保留目标设备需要的 ABI（电视为 arm64-v8a；x86_64 供模拟器冒烟）。
+        // TFLite 运行时自带 4 个 ABI 的原生库，若不限制会把 APK 撑大 ~12MB。
+        ndk { abiFilters "arm64-v8a", "x86_64" }
     }
 
     buildTypes {
@@ -57,4 +60,9 @@ dependencies {
     // 需要支持其它 ABI（如 x86_64 模拟器）时，从同一 AAR 的 jni/<abi>/ 再拷入即可；
     // 缺失 ABI 时 Aec3Processor 会捕获 UnsatisfiedLinkError 并自动降级。
     implementation(files("libs/aec3-classes.jar"))
+
+    // ---- 神经网络回声消除（DTLN-aec，微软 AEC-Challenge 第 3 名，MIT）----
+    // 线性 AEC3 在本电视上 ERLE≈0（回声路径非线性，互相关≈0）；离线实测 DTLN-aec
+    // 在相同录音上可达 23.9~29.8dB 抑制，且最小规格（128，7MB）即可，故用它替代 AEC3。
+    implementation("org.tensorflow:tensorflow-lite:2.14.0")
 }

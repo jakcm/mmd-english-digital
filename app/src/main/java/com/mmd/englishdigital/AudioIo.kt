@@ -8,8 +8,17 @@ import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.util.Log
 
-/** 麦克风采集：16kHz / 单声道 / 16bit，20ms 一帧回调。内置 AEC（可用时）。 */
-class AudioCapture(private val onFrame: (ByteArray) -> Unit) {
+/** 麦克风采集：16kHz / 单声道 / 16bit，20ms 一帧回调。内置 AEC（可用时）。
+ *
+ * [半双工坑] 部分设备（尤其电视）在 AudioSource=VOICE_COMMUNICATION 且播放
+ * USAGE_VOICE_COMMUNICATION 时，HAL 会在播放期间**直接掐掉麦克风**（数字静音），
+ * 导致 AI 说话时用户的声音根本采不到。故把 source 做成可配置，便于验证换成
+ * MIC / VOICE_RECOGNITION 是否能绕开该行为。
+ */
+class AudioCapture(
+    private val source: Int = MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+    private val onFrame: (ByteArray) -> Unit
+) {
     private var record: AudioRecord? = null
     private var aec: AcousticEchoCanceler? = null
 
@@ -28,7 +37,7 @@ class AudioCapture(private val onFrame: (ByteArray) -> Unit) {
         if (minBuf <= 0) return false
         val r = try {
             AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                source,
                 SeeduplexClient.IN_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
@@ -77,7 +86,10 @@ class AudioCapture(private val onFrame: (ByteArray) -> Unit) {
 }
 
 /** 播放：24kHz / 单声道 / 16bit 流式。无声环境（模拟器）下 start() 返回 false。 */
-class AudioPlayer(private val sampleRate: Int = SeeduplexClient.OUT_RATE) {
+class AudioPlayer(
+    private val sampleRate: Int = SeeduplexClient.OUT_RATE,
+    private val usage: Int = AudioAttributes.USAGE_VOICE_COMMUNICATION
+) {
     private var track: AudioTrack? = null
     var bytesWritten: Long = 0; private set
 
@@ -104,7 +116,7 @@ class AudioPlayer(private val sampleRate: Int = SeeduplexClient.OUT_RATE) {
             AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setUsage(usage)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build()
                 )
