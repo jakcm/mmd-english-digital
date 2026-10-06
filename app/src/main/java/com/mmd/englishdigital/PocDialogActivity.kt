@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import java.io.File
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -12,6 +13,7 @@ import android.widget.TextView
 import com.bytedance.speech.speechengine.SpeechEngine
 import com.bytedance.speech.speechengine.SpeechEngineDefines
 import com.bytedance.speech.speechengine.SpeechEngineGenerator
+import com.bytedance.speech.speechengine.SpeechResourceManagerGenerator
 
 /**
  * POC：验证火山引擎官方「端到端实时语音 DIALOG」SDK 能否实现播报中打断。
@@ -115,6 +117,29 @@ class PocDialogActivity : Activity(), SpeechEngine.SpeechListener {
                     }
                     log("鉴权模式: type=$authType secret长度=${authSecret.length} credential=${!authCredential.isNullOrEmpty()}")
                 }
+                // 3.5) 尝试用 SDK 自带的资源管理器下载 AEC 模型（官方设计路径）
+                var fetchedModel: String? = aecModelPath
+                try {
+                    val rm = SpeechResourceManagerGenerator.getInstance()
+                    rm.setAppId(appid)
+                    rm.setEngineName(SpeechEngineDefines.DIALOG_ENGINE)
+                    val ok = rm.initResourceManager(applicationContext, RESOURCE_ID)
+                    log("ResourceManager init = $ok")
+                    for (name in listOf("aec_model", "aec", "volc.speech.dialog.aec")) {
+                        try {
+                            val has = rm.checkResourceDownload(name)
+                            log("  资源 $name 已下载=$has")
+                            if (has) {
+                                val p = rm.getResourcePath(name)
+                                log("  资源路径 $name = $p")
+                                if (!p.isNullOrEmpty() && File(p).exists()) { fetchedModel = p; break }
+                            }
+                        } catch (t: Throwable) { log("  检查 $name 异常: ${t.message}") }
+                    }
+                } catch (t: Throwable) {
+                    log("资源管理器异常: ${t.javaClass.simpleName}: ${t.message}")
+                }
+
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_DIALOG_ADDRESS_STRING, addr)
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_DIALOG_URI_STRING, uri)
                 log("地址: $addr$uri")
@@ -123,11 +148,11 @@ class PocDialogActivity : Activity(), SpeechEngine.SpeechListener {
                 val aecOn = intent?.getBooleanExtra("aec", false) ?: false
                 if (aecOn) {
                     e.setOptionBoolean(SpeechEngineDefines.PARAMS_KEY_ENABLE_AEC_BOOL, true)
-                    if (!aecModelPath.isNullOrEmpty()) {
-                        e.setOptionString(SpeechEngineDefines.PARAMS_KEY_AEC_MODEL_PATH_STRING, aecModelPath)
-                        log("AEC 模型路径: $aecModelPath")
+                    if (!fetchedModel.isNullOrEmpty()) {
+                        e.setOptionString(SpeechEngineDefines.PARAMS_KEY_AEC_MODEL_PATH_STRING, fetchedModel)
+                        log("AEC 模型路径: $fetchedModel")
                     } else {
-                        log("⚠️ AEC 已开启但未提供模型路径（官方要求开启时必填，可能导致 -1）")
+                        log("⚠️ AEC 已开启但未提供模型路径（官方要求开启时必填）")
                     }
                 } else {
                     e.setOptionBoolean(SpeechEngineDefines.PARAMS_KEY_ENABLE_AEC_BOOL, false)
