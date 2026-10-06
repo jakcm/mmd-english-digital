@@ -530,10 +530,11 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                 val r2 = e.sendDirective(SpeechEngineDefines.DIRECTIVE_START_ENGINE, json)
                 Log.i(TAG, "SDK START_ENGINE = $r2")
                 dialogStarted = r2 == 0
-                callActive = dialogStarted
+                // ★ 注意：callActive 不在此处置位！START_ENGINE 只是"指令被接受"，
+                //   服务端会话尚未建立（EVT[3003] 通常晚 0.4~0.8s）。
+                //   过早置位会导致按钮提前变红且上行音频被丢。改到 onSessionCreated() 里置位。
                 main.post {
-                    setStatus(if (dialogStarted) "🎙️ 对话中，直接说话即可" else "❌ 启动失败 ret=$r2")
-                    updateCallUi()   // ★ 根因修复：原来这里只 render()，按钮从不刷新 → 永不变红
+                    setStatus(if (dialogStarted) "🔄 正在接通…" else "❌ 启动失败 ret=$r2")
                     render()
                 }
             } catch (t: Throwable) {
@@ -871,9 +872,12 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
     override fun onStatus(msg: String) { main.post { setStatus(msg) } }
 
     override fun onSessionCreated(sessionId: String?) {
+        // ★ 会话真正建立 → 此刻才置 callActive 并刷新按钮（红）
+        callActive = true
         controller?.onCallConnected()
         main.post {
-            setStatus("✅ 会话已建立")
+            setStatus("🎙️ 对话中，直接说话即可")
+            updateCallUi()
             appendSystem("session.created id=$sessionId")
         }
     }
