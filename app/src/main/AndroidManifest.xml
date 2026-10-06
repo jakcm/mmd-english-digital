@@ -29,7 +29,7 @@
         android:usesCleartextTraffic="false"
         android:theme="@style/Theme.AppCompat.DayNight.NoActionBar">
         <activity
-            android:name=".MainActivity"
+            android:name=".DialogCallActivity"
             android:exported="true"
             android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden">
@@ -39,6 +39,11 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden" />
         <!-- POC：验证官方端到端实时语音 SDK 的播报中打断能力（凭据走启动参数） -->
         <activity
             android:name=".PocDialogActivity"
