@@ -67,6 +67,8 @@ class PocDialogActivity : Activity(), SpeechEngine.SpeechListener {
         val aecModelPath = intent?.getStringExtra("aecModelPath")
         val addr = intent?.getStringExtra("addr") ?: DEFAULT_ADDRESS
         val uri = intent?.getStringExtra("uri") ?: DEFAULT_URI
+        // Token 是与 AppKey 不同的凭据（官方文档【必需配置】）
+        val appToken = intent?.getStringExtra("appToken") ?: ""
 
         // 简易 UI：状态 + 滚动日志
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 40, 40, 40) }
@@ -91,9 +93,18 @@ class PocDialogActivity : Activity(), SpeechEngine.SpeechListener {
                 engine = e
                 e.createEngine()
 
-                // 3) 参数：鉴权 + 资源 + 内置 AEC
+                // 3) 参数：引擎名 + 鉴权 + 资源 + 内置 AEC
+                // ★ 必需：Engine Name —— 漏设会导致 SDK 不知初始化哪个引擎，
+                //   报出误导性的 -202(ERR_ADDRESS_INVALID)
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_ENGINE_NAME_STRING, SpeechEngineDefines.DIALOG_ENGINE)
+                // ★ 必需：User ID（辅助定位线上问题，可固定字符串）
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_UID_STRING, "mmd-tv-001")
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_ID_STRING, appid)
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_KEY_STRING, appkey)
+                // ★ 必需：Token（与 AppKey 是两个不同凭据）
+                if (!appToken.isNullOrEmpty()) {
+                    e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_TOKEN_STRING, appToken)
+                }
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_RESOURCE_ID_STRING, RESOURCE_ID)
                 // 鉴权模式：late_bind 走"新版鉴权"（用 API Key），空则走旧版 access_token
                 if (!authType.isNullOrEmpty()) {
@@ -107,11 +118,20 @@ class PocDialogActivity : Activity(), SpeechEngine.SpeechListener {
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_DIALOG_ADDRESS_STRING, addr)
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_DIALOG_URI_STRING, uri)
                 log("地址: $addr$uri")
-                // 内置 AEC（关键）：既要开录音又要开播放，必须开启
-                e.setOptionBoolean(SpeechEngineDefines.PARAMS_KEY_ENABLE_AEC_BOOL, true)
-                if (!aecModelPath.isNullOrEmpty()) {
-                    e.setOptionString(SpeechEngineDefines.PARAMS_KEY_AEC_MODEL_PATH_STRING, aecModelPath)
-                    log("AEC 模型路径: $aecModelPath")
+                // 内置 AEC（关键）：既要开录音又要开播放时必须开启；
+                // 但【开启 AEC 时 aec_model_path 必填】，否则 initEngine 返回 -1
+                val aecOn = intent?.getBooleanExtra("aec", false) ?: false
+                if (aecOn) {
+                    e.setOptionBoolean(SpeechEngineDefines.PARAMS_KEY_ENABLE_AEC_BOOL, true)
+                    if (!aecModelPath.isNullOrEmpty()) {
+                        e.setOptionString(SpeechEngineDefines.PARAMS_KEY_AEC_MODEL_PATH_STRING, aecModelPath)
+                        log("AEC 模型路径: $aecModelPath")
+                    } else {
+                        log("⚠️ AEC 已开启但未提供模型路径（官方要求开启时必填，可能导致 -1）")
+                    }
+                } else {
+                    e.setOptionBoolean(SpeechEngineDefines.PARAMS_KEY_ENABLE_AEC_BOOL, false)
+                    log("AEC 已关闭（-202 阶段验证用）")
                 }
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_LOG_LEVEL_STRING, SpeechEngineDefines.LOG_LEVEL_DEBUG)
 
@@ -121,7 +141,13 @@ class PocDialogActivity : Activity(), SpeechEngine.SpeechListener {
                 // 4) 初始化
                 val ret = e.initEngine()
                 log("initEngine = $ret (0 为成功)")
-                ui.post { status.text = if (ret == 0) "引擎就绪 ✅ 点「开始会话」" else "初始化失败 ret=$ret ❌" }
+                ui.post { status.text = if (ret == 0) "引擎就绪 ✅" else "初始化失败 ret=$ret ❌" }
+                // 自动启动会话（POC 免点击：adb 无法可靠点击自绘按钮）
+                if (ret == 0 && intent?.getBooleanExtra("autoStart", false) == true) {
+                    Thread.sleep(1500)
+                    log("自动启动会话…")
+                    startSession()
+                }
             } catch (t: Throwable) {
                 log("异常: ${t.javaClass.simpleName}: ${t.message}")
                 Log.e(TAG, "init failed", t)
