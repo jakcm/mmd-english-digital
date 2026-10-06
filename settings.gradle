@@ -10,6 +10,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // 火山引擎语音 SDK（端到端实时语音 DIALOG 引擎，内置多级 AEC）
+        maven { url "https://artifact.bytedance.com/repository/Volcengine/" }
     }
 }
 rootProject.name = "mmd-english-digital"

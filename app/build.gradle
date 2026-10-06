@@ -61,6 +61,12 @@ dependencies {
     implementation("com.google.android.material:material:1.11.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
+
+    // ---- 火山引擎官方端到端实时语音 SDK（POC 验证用，见 PocDialogActivity）----
+    // 内含: 线性AEC3 + 神经网络AEC(sami::AecModel, DeepVQE) + Kalman + 麦克风阵列选择
+    //      + ByteNN 推理引擎 + 帧级VAD + 录音/播放/WebSocket 全链路
+    // 官方说明: "Dialog SDK 内置 AEC 能力...硬件 AEC 为强制开启，不会自打断"
+    implementation("com.bytedance.speechengine:speechengine_tob:0.0.15.0.1-bugfix")
     // 本地 VAD（WebRTC VAD GMM）；2.0.9 用 Kotlin 1.9.21 构建，与本项目兼容
     implementation("com.cloudflare.realtimekit.android-vad:webrtc:2.0.9")
 
