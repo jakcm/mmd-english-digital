@@ -61,6 +61,15 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
     private var callActive = false
     private var receivedAudioBytes = 0L
     private var lastStatus: String = ""
+    /**
+     * 本地 VAD 打断开关。
+     * 仅当**硬件 AEC 真正生效**时启用：
+     *  - 手机：硬件 AEC 生效 → 麦克风听不到 AI 自己的声音 → 本地 VAD 可靠，可做低延迟打断；
+     *  - 电视：无硬件 AEC（或形同虚设），靠软件 AEC3 兜底，但实测残余回声仍有 0~19dB 波动，
+     *    本地 VAD 会把 AI 自己的声音判成"用户插话" → AI 一开口就被自己打断。
+     *    此时关闭本地打断，改由**服务端**（input_audio_transcription.started）判定用户开口，避免自打断。
+     */
+    private var localBargeEnabled = true
 
     // API Key 仅存本机（明文），不写入源码或 APK
     private val prefs by lazy { getSharedPreferences("mmd_prefs", MODE_PRIVATE) }
@@ -375,9 +384,12 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
         // 但 create()/enabled 实际失败（AudioCapture 里 active=false，效果器是空壳），
         // 此时回声完全没被消除。仅用 isAvailable() 判断会漏判 → 软件 AEC3 不启用 → bug 依旧。
         val hwAec = capture?.hwAecActive == true
-        aec = if (hwAec) null else Aec3Processor.createOrNull(player?.bufferMs ?: 0)
+        val delayMs = player?.bufferMs ?: 0
+        aec = if (hwAec) null else Aec3Processor.createOrNull(delayMs)
         player?.onRender = { pcm -> aec?.feedRender(pcm) }   // 把正在播放的 AI 音频作为 far-end 参考
-        Log.i(TAG, "software AEC3 = ${aec != null} (hwAecActive=$hwAec, playerBufferMs=${player?.bufferMs})")
+        // 关键修复：本地 VAD 打断只在硬件 AEC 真正生效时启用；否则回声残留会误判为"用户插话"。
+        localBargeEnabled = hwAec
+        Log.i(TAG, "software AEC3 = ${aec != null} (hwAecActive=$hwAec, delayMs=$delayMs, playerBufferMs=${player?.bufferMs}, localBarge=$localBargeEnabled)")
         if (aec != null) appendSystem("🎧 软件 AEC3 已启用（硬件回声消除未生效）")
 
         callActive = true
@@ -402,6 +414,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener {
 
     /** 本地 VAD 判语音（每 20ms 一帧，来自音频采集线程）。仅在 AI 正在播报时打断。 */
     private fun onBargeVad(isSpeech: Boolean) {
+        if (!localBargeEnabled) return   // 硬件 AEC 未生效（电视）：本地 VAD 不可靠，交由服务端判定
         if (!callActive || !aiResponding || bargeArmed) return
         if (!isSpeech) {
             bargeSilenceSeen = true

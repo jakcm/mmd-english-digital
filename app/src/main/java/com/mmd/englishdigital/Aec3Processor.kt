@@ -127,7 +127,9 @@ class Aec3Processor private constructor(
     // ---- ERLE 观测（仅日志，便于电视上核实）----
     private var obsRaw = 0.0
     private var obsClean = 0.0
+    private var obsRef = 0.0
     private var obsCnt = 0
+    @Volatile private var fedSamples = 0L
 
     /** 启动 render 定拍线程：每 10ms 喂一帧 far-end（队列空则补零，保证连续）。 */
     private fun start() {
@@ -155,6 +157,9 @@ class Aec3Processor private constructor(
                         for (k in 0 until FRAME) rf[k] = inF[k]
                     }
                     try {
+                        var rr = 0.0
+                        for (k in 0 until FRAME) rr += rf[k].toDouble() * rf[k].toDouble()
+                        obsRef += rr
                         renderBuf.writeChannel(0, rf)
                         ec.analyzeRender(renderBuf)
                     } catch (e: Throwable) {
@@ -180,6 +185,7 @@ class Aec3Processor private constructor(
      */
     fun feedRender(pcm24k: ByteArray) {
         synchronized(lock) {
+            fedSamples += (pcm24k.size / 2).toLong()
             var i = 0
             while (i + 1 < pcm24k.size) {
                 val cur = ((pcm24k[i + 1].toInt() shl 8) or (pcm24k[i].toInt() and 0xFF)).toShort().toInt()
@@ -245,9 +251,10 @@ class Aec3Processor private constructor(
 
             if (obsCnt >= RATE * 2) {   // 约每 2s 打一条 ERLE，便于电视上核实效果
                 val erle = 10.0 * log10(obsRaw / maxOf(obsClean, 1e-9))
-                Log.i(TAG, "ERLE≈%.1f dB（原始RMS=%.1f 消除后RMS=%.1f）".format(
-                    erle, sqrt(obsRaw / obsCnt), sqrt(obsClean / obsCnt)))
-                obsRaw = 0.0; obsClean = 0.0; obsCnt = 0
+                Log.i(TAG, "ERLE≈%.1f dB（原始RMS=%.1f 消除后RMS=%.1f 参考RMS=%.1f fed=%d delay=%d）".format(
+                    erle, sqrt(obsRaw / obsCnt), sqrt(obsClean / obsCnt),
+                    sqrt(obsRef / obsCnt), fedSamples, renderDelaySamples))
+                obsRaw = 0.0; obsClean = 0.0; obsRef = 0.0; obsCnt = 0
             }
             return out.toByteArray()
         }
