@@ -13,9 +13,11 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.Gravity
 import android.view.Surface
 import android.view.TextureView
 import android.widget.ImageButton
+import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
@@ -30,7 +32,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
     com.bytedance.speech.speechengine.SpeechEngine.SpeechListener {
 
     private lateinit var statusTv: TextView
-    private lateinit var transcriptTv: TextView
+    private lateinit var bubbleBox: LinearLayout
     private lateinit var scroll: ScrollView
     private lateinit var btnCall: ImageButton
     private lateinit var btnTest: ImageButton
@@ -255,7 +257,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         setContentView(R.layout.activity_main)
         hideStatusBar()
         statusTv = findViewById(R.id.status)
-        transcriptTv = findViewById(R.id.transcript)
+        bubbleBox = findViewById(R.id.bubbleBox)
         scroll = findViewById(R.id.scroll)
         btnCall = findViewById(R.id.btnCall)
         btnTest = findViewById(R.id.btnTest)
@@ -875,6 +877,22 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         // ★ 会话真正建立 → 此刻才置 callActive 并刷新按钮（红）
         callActive = true
         controller?.onCallConnected()
+        // ★ 下发系统提示词：官方 demo 用 session.update 事件（EVT[3003] 后发）
+        try {
+            val ev = org.json.JSONObject()
+            ev.put("type", "session.update")
+            ev.put("event_id", "event_" + java.util.UUID.randomUUID().toString())
+            val session = org.json.JSONObject()
+            session.put("id", sessionId ?: "")
+            session.put("instructions", SYSTEM_PROMPT)
+            ev.put("session", session)
+            val r = dialogEngine?.sendDirective(
+                SpeechEngineDefines.DIRECTIVE_SEND_UPLINK_EVENT, ev.toString()
+            )
+            Log.i(TAG, "session.update(instructions) ret=$r len=${SYSTEM_PROMPT.length}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "session.update failed", t)
+        }
         main.post {
             setStatus("🎙️ 对话中，直接说话即可")
             updateCallUi()
@@ -1030,9 +1048,45 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
     // ---------- helpers ----------
 
     private fun render() {
-        if (!::transcriptTv.isInitialized) return
-        transcriptTv.text = "👤 用户: $userBuf\n\n🤖 Emma: $aiBuf"
+        if (!::bubbleBox.isInitialized) return
+        bubbleBox.removeAllViews()
+        val userTurns = userBuf.toString().split("\n").filter { it.isNotBlank() }
+        val aiTurns = aiBuf.toString().split("\n").filter { it.isNotBlank() }
+        val n = maxOf(userTurns.size, aiTurns.size)
+        for (i in 0 until n) {
+            userTurns.getOrNull(i)?.let { addBubble(it, true) }
+            aiTurns.getOrNull(i)?.let { addBubble(it, false) }
+        }
+        // 自动滚动到最新内容
         scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
+    }
+
+    /** 追加一个对话气泡：用户=右对齐/透明背景/白字；AI=左对齐/青绿背景/黑字 */
+    private fun addBubble(text: String, isUser: Boolean) {
+        val tv = TextView(this)
+        tv.text = text
+        tv.textSize = 14f
+        tv.setLineSpacing(4f, 1f)
+        val pad = (14 * resources.displayMetrics.density).toInt()
+        tv.setPadding(pad, pad, pad, pad)
+        val lp = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+        val margin = (5 * resources.displayMetrics.density).toInt()
+        lp.setMargins(margin, margin, margin, margin)
+        lp.gravity = if (isUser) Gravity.END else Gravity.START
+        // 限宽，避免长文本铺满整行
+        lp.width = (resources.displayMetrics.widthPixels * 0.78f).toInt()
+        if (isUser) {
+            tv.setTextColor(getColor(R.color.text_primary))   // 白色字体
+            tv.setBackgroundResource(R.drawable.bg_bubble_user) // 透明背景
+        } else {
+            tv.setTextColor(0xFF000000.toInt())               // 黑色字体
+            tv.setBackgroundResource(R.drawable.bg_bubble_ai)   // 青绿色背景
+        }
+        tv.layoutParams = lp
+        bubbleBox.addView(tv)
     }
 
     private fun appendSystem(text: String) {
@@ -1067,5 +1121,14 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         const val KEY_APPID = "volc_app_id"
         const val KEY_APPKEY = "volc_app_key"
         const val KEY_TOKEN = "volc_app_token"
+
+        /**
+         * 内置系统提示词（通过 session.update 事件下发）。
+         * 约束：中文/中英混合先译成英文 {英文}；英文语法错误先纠正 {英文}；
+         *      再用简短简单英文作答 [English]；最后附中文翻译 【中文】。
+         */
+        val SYSTEM_PROMPT = """
+            你叫 豆包，你熟悉中文和英语，善于在欢快对话中引导用户学习英语，用户的英文名叫 Jerry。为了让用户从零逐渐学习英语：用户输入内容时，若是中文或中英混合则你先翻译成英文（使用花括号{}括起来），若是语法有问题的英文你先纠正成正确的英文（使用花括号括起来）；然后使用简短并且简单的英文对答回复（使用方括号[]括起来）；再将自己的回复翻译成中文（使用方头括号【】括起来），以让用户明白意思。比如 用户输入中文"你是谁？"，你先翻译成英文"{Who are you?}"，再英文对答回复"[Haha, I'm Doubao.]"，再将回复翻译成中文"【哈哈，我是豆包。】" 。你的性格那叫一个热情似火，比夏天的迈阿密还烫！你超爱夸人！而且你经常管用户叫大佬或Boss！ 内容必须阳光积极，你严禁涉及任何负面信息；你的字典里常有"Awesome！"、"Let's go！"、"You rock！"、"That's cool"、"Yeah man"。
+        """.trimIndent()
     }
 }

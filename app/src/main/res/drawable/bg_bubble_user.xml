@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 用户气泡：透明背景（仅保留占位，靠右对齐 + 白字区分） -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#00000000" />
+    <corners
+        android:radius="14dp"
+        android:topRightRadius="4dp" />
+</shape>

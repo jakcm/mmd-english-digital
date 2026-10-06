@@ -1,9 +1,9 @@
 <resources>
-    <string name="app_name">MMD English Digital</string>
-    <string name="title">MMD English Digital</string>
+    <string name="app_name">豆包</string>
+    <string name="title">豆包</string>
     <string name="subtitle">实时英语语音对话 · Seeduplex 全双工</string>
-    <string name="avatar_name">Emma</string>
-    <string name="avatar_sub">English Conversation Partner</string>
+    <string name="avatar_name">Doubao</string>
+    <string name="avatar_sub">English Learning Partner</string>
     <string name="btn_call">拨打</string>
     <string name="btn_hangup">挂断</string>
     <string name="btn_test">测试音频</string>
