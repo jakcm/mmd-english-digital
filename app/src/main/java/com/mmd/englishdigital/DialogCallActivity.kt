@@ -6,7 +6,6 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -63,6 +62,9 @@ class DialogCallActivity : Activity(), SpeechEngine.SpeechListener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // ★ 统一日志开关（与其他入口保持一致）
+        L.init(if (intent?.hasExtra("log") == true) intent.getBooleanExtra("log", false) else null)
         buildUi()
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
@@ -200,7 +202,7 @@ class DialogCallActivity : Activity(), SpeechEngine.SpeechListener {
                             model.outputStream().use { o -> i.copyTo(o) }
                         }
                     } catch (t: Throwable) {
-                        Log.w(TAG, "释放 AEC 模型失败: ${t.message}")
+                        L.w(TAG, "释放 AEC 模型失败: ${t.message}")
                     }
                 }
                 e.setOptionBoolean(SpeechEngineDefines.PARAMS_KEY_ENABLE_AEC_BOOL, true)
@@ -212,7 +214,7 @@ class DialogCallActivity : Activity(), SpeechEngine.SpeechListener {
                 e.setContext(applicationContext)
                 e.setListener(this)
                 val ret = e.initEngine()
-                Log.i(TAG, "initEngine = $ret")
+                L.i(TAG, "initEngine = $ret")
                 if (ret != 0) {
                     ui.post { status.text = "❌ 初始化失败 ret=$ret" }
                     say("系统", "初始化失败 ret=$ret")
@@ -221,7 +223,7 @@ class DialogCallActivity : Activity(), SpeechEngine.SpeechListener {
                 ui.post { status.text = "✅ 引擎就绪" }
                 startConn()
             } catch (t: Throwable) {
-                Log.e(TAG, "start failed", t)
+                L.e(TAG, "start failed", t)
                 ui.post { status.text = "❌ 异常: ${t.message}" }
             }
         }.start()
@@ -233,7 +235,7 @@ class DialogCallActivity : Activity(), SpeechEngine.SpeechListener {
         // extra.input_mod=keep_alive 是全双工开关（缺了服务端报 45000001）
         val json = """{"dialog":{"extra":{"input_mod":"keep_alive","model":"1.2.1.1"},"bot_name":"豆包"}}"""
         val ret = e.sendDirective(SpeechEngineDefines.DIRECTIVE_START_ENGINE, json)
-        Log.i(TAG, "START_ENGINE = $ret")
+        L.i(TAG, "START_ENGINE = $ret")
         started = ret == 0
         ui.post { status.text = if (started) "🎙️ 对话中，直接说话即可" else "❌ 启动失败 ret=$ret" }
     }
@@ -263,14 +265,14 @@ class DialogCallActivity : Activity(), SpeechEngine.SpeechListener {
     override fun onSpeechMessage(type: Int, data: ByteArray?, len: Int) {
         val raw = data?.let { String(it, 0, minOf(len, it.size)) } ?: ""
         when (type) {
-            1001 -> { Log.i(TAG, "引擎启动"); ui.post { status.text = "✅ 引擎已启动" } }
-            1002 -> Log.i(TAG, "引擎停止")
+            1001 -> { L.i(TAG, "引擎启动"); ui.post { status.text = "✅ 引擎已启动" } }
+            1002 -> L.i(TAG, "引擎停止")
             1003 -> {
-                Log.e(TAG, "引擎错误: $raw")
+                L.e(TAG, "引擎错误: $raw")
                 say("系统", "引擎错误: ${raw.take(160)}")
             }
             SpeechEngineDefines.MESSAGE_TYPE_DIALOG_SESSION_STARTED -> {
-                Log.i(TAG, "对话建立: $raw")
+                L.i(TAG, "对话建立: $raw")
                 ui.post { status.text = "🎙️ 对话中（会话已建立）" }
                 say("系统", "会话已建立，请说话")
             }
@@ -281,7 +283,7 @@ class DialogCallActivity : Activity(), SpeechEngine.SpeechListener {
                     val txt = o.optJSONArray("results")?.optJSONObject(0)?.optString("text").orEmpty()
                     val score = o.optJSONObject("extra")?.optDouble("interrupt_score", 0.0) ?: 0.0
                     if (txt.isNotEmpty()) {
-                        Log.i(TAG, "ASR: $txt (interrupt_score=$score, aiSpeaking=$aiSpeaking)")
+                        L.i(TAG, "ASR: $txt (interrupt_score=$score, aiSpeaking=$aiSpeaking)")
                         say("你", txt)
                     }
                 }
@@ -304,11 +306,11 @@ class DialogCallActivity : Activity(), SpeechEngine.SpeechListener {
                 }
             }
             SpeechEngineDefines.MESSAGE_TYPE_DIALOG_CHAT_ENDED -> {}
-            else -> Log.d(TAG, "EVT[$type] $raw")
+            else -> L.d(TAG, "EVT[$type] $raw")
         }
     }
 
     override fun onSpeechLogid(logid: String?) {
-        Log.d(TAG, "logid: $logid")
+        L.d(TAG, "logid: $logid")
     }
 }

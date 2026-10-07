@@ -1,6 +1,5 @@
 package com.mmd.englishdigital
 
-import android.util.Log
 import kotlin.math.sqrt
 
 /**
@@ -64,7 +63,7 @@ class FarEndGate(
             val now = System.currentTimeMillis()
             if (now - lastLog > 1000) {
                 lastLog = now
-                Log.i(TAG, "门控: 放行 mic=${level.toInt()} 门限=${threshold.toInt()} (fe=${fe.toInt()}) 补发=${out.size - 1}帧 增益=${"%.1f".format(agc.currentGain())}")
+                L.i(TAG, "门控: 放行 mic=${level.toInt()} 门限=${threshold.toInt()} (fe=${fe.toInt()}) 补发=${out.size - 1}帧 增益=${"%.1f".format(agc.currentGain())}")
             }
             return out
         }

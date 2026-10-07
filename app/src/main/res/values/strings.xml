@@ -12,5 +12,8 @@
     <string name="settings">设置 API Key</string>
     <string name="hint">无麦克风环境（模拟器）：点「测试音频」流式发送内置英文语音，验证端到端链路。</string>
     <string name="status_idle">未连接</string>
+    <!-- ★ 状态区只显示这两种文案（A2） -->
+    <string name="status_in_call">通话中</string>
+    <string name="status_waiting">待唤醒：“豆包豆包”</string>
     <string name="auto_mode">自动</string>
 </resources>

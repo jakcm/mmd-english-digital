@@ -6,7 +6,6 @@ import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
-import android.util.Log
 
 /** 麦克风采集：16kHz / 单声道 / 16bit，20ms 一帧回调。内置 AEC（可用时）。
  *
@@ -44,7 +43,7 @@ class AudioCapture(
                 maxOf(minBuf, SeeduplexClient.FRAME_BYTES * 10)
             )
         } catch (e: Exception) {
-            Log.w("AudioCapture", "AudioRecord init failed: ${e.message}")
+            L.w("AudioCapture", "AudioRecord init failed: ${e.message}")
             return false
         }
         if (r.state != AudioRecord.STATE_INITIALIZED) {
@@ -59,7 +58,7 @@ class AudioCapture(
             }
         }
         hwAecActive = aec?.enabled == true
-        Log.i(
+        L.i(
             "AudioCapture",
             "HW AEC available=${AcousticEchoCanceler.isAvailable()} active=$hwAecActive"
         )
@@ -131,13 +130,14 @@ class AudioPlayer(
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
         } catch (e: Exception) {
-            Log.w("AudioPlayer", "AudioTrack init failed: ${e.message}")
+            L.w("AudioPlayer", "AudioTrack init failed: ${e.message}")
             return false
         }
         if (t.state != AudioTrack.STATE_INITIALIZED) {
             t.release(); return false
         }
         track = t
+        bytesWritten = 0L      // ★ 复位（playbackHeadPosition 从 0 开始）
         t.play()
         return true
     }
@@ -161,9 +161,28 @@ class AudioPlayer(
             track?.pause()
             track?.flush()
             track?.play()
+            bytesWritten = 0L   // ★ flush 后播放头归零，同步复位写入计数
         } catch (_: Exception) {
         }
     }
+
+    /**
+     * ★ 尚未播放的字节数 = 已写入 - 播放头已播。
+     * 用于判定「AI 是否真的还在播报」——服务端的 TTS_ENDED 只表示
+     * 「音频数据下发完毕」，长回复时数据先一次传完，播放器里可能还有上百秒缓冲。
+     */
+    fun pendingBytes(): Long {
+        val t = track ?: return 0L
+        return try {
+            val played = t.playbackHeadPosition.toLong() * 2L   // 帧数 × 2 字节
+            (bytesWritten - played).coerceAtLeast(0L)
+        } catch (_: Exception) {
+            0L
+        }
+    }
+
+    /** ★ 是否仍在播报（缓冲里还有 >200ms 音频） */
+    fun isPlaying(): Boolean = pendingBytes() > (sampleRate * 2L * 200L / 1000L)
 
     fun stop() {
         try { track?.stop() } catch (_: Exception) {}

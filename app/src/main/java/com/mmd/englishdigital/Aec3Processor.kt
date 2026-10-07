@@ -1,6 +1,5 @@
 package com.mmd.englishdigital
 
-import android.util.Log
 import cn.enaium.webrtc.aec3.Aec3AudioBuffer
 import cn.enaium.webrtc.aec3.Aec3Config
 import cn.enaium.webrtc.aec3.Aec3EchoControl
@@ -100,7 +99,7 @@ class Aec3Processor private constructor(
             val delaySamples = (renderDelayMs.coerceAtLeast(0) * RATE / 1000)
             Aec3Processor(config, env, factory, ec, rb, cb, delaySamples).also { it.start() }
         } catch (e: Throwable) {
-            Log.w(TAG, "AEC3 不可用，保持原始音频：${e.javaClass.simpleName}: ${e.message}")
+            L.w(TAG, "AEC3 不可用，保持原始音频：${e.javaClass.simpleName}: ${e.message}")
             null
         }
     }
@@ -163,7 +162,7 @@ class Aec3Processor private constructor(
                         renderBuf.writeChannel(0, rf)
                         ec.analyzeRender(renderBuf)
                     } catch (e: Throwable) {
-                        Log.w(TAG, "analyzeRender 失败：${e.message}")
+                        L.w(TAG, "analyzeRender 失败：${e.message}")
                     }
                 }
                 next += nanos
@@ -238,7 +237,7 @@ class Aec3Processor private constructor(
                     obsRaw += rp; obsClean += cp; obsCnt += FRAME
                 } catch (e: Throwable) {
                     // 单帧异常时原样透传，避免中断整条音频链
-                    Log.w(TAG, "processCapture 失败，本帧透传：${e.message}")
+                    L.w(TAG, "processCapture 失败，本帧透传：${e.message}")
                     for (k in 0 until FRAME) {
                         val c = cIn[k].toInt().coerceIn(-32768, 32767)
                         out.write(c and 0xFF); out.write((c shr 8) and 0xFF)
@@ -251,7 +250,7 @@ class Aec3Processor private constructor(
 
             if (obsCnt >= RATE * 2) {   // 约每 2s 打一条 ERLE，便于电视上核实效果
                 val erle = 10.0 * log10(obsRaw / maxOf(obsClean, 1e-9))
-                Log.i(TAG, "ERLE≈%.1f dB（原始RMS=%.1f 消除后RMS=%.1f 参考RMS=%.1f fed=%d delay=%d）".format(
+                L.i(TAG, "ERLE≈%.1f dB（原始RMS=%.1f 消除后RMS=%.1f 参考RMS=%.1f fed=%d delay=%d）".format(
                     erle, sqrt(obsRaw / obsCnt), sqrt(obsClean / obsCnt),
                     sqrt(obsRef / obsCnt), fedSamples, renderDelaySamples))
                 obsRaw = 0.0; obsClean = 0.0; obsRef = 0.0; obsCnt = 0

@@ -12,7 +12,6 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import android.view.Gravity
 import android.view.Surface
 import android.view.TextureView
@@ -57,6 +56,22 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
     // ---- 通话中打断 / barge-in（用户插话即停播并进入下一轮）----
     private var bargeVad: LocalVad? = null
     @Volatile private var aiResponding = false
+    /** 3018 播放音频帧计数（只统计，不打印内容） */
+    /** ★ AI 本轮播报：已收到音频字节数 + 首帧时刻（用于推算播放终点） */
+    @Volatile private var aiAudioBytesTotal = 0L
+    @Volatile private var aiAudioFirstAt = 0L
+    /** 播放终点安全余量（SDK 内部缓冲/抖动） */
+    private val AI_PLAY_MARGIN_MS = 1500L
+    /** ★ 播放终点（在 3011 时一次性算定的定值；0 = 未定） */
+    @Volatile private var aiPlaybackEndsAt = 0L
+    /** ★ 服务端声明的本轮音频总时长（ms），来自 3009 的 sentence_duration.sentence_end_time */
+    @Volatile private var aiAudioDurationMs = 0L
+    /** ★ 本轮 AI 播报起点（首个 3008 时刻），作为播放起点锚 */
+    @Volatile private var aiTurnStartedAt = 0L
+    /** "推算播放已结束"只打一次日志 */
+    @Volatile private var playbackEndLogged = false
+    @Volatile private var playerAudioFrames = 0L
+    @Volatile private var playerAudioBytes = 0L
     @Volatile private var bargeArmed = false
     @Volatile private var dropAudio = false
     @Volatile private var bargeSilenceSeen = false
@@ -110,11 +125,22 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
      */
     private var localBargeEnabled = true
 
+    // ---- 前后台切换：退到后台即释放麦克风，回前台按配置恢复 ----
+    /** 是否处于前台（onStart 之后、onStop 之前） */
+    @Volatile private var isForeground = true
+    /** 是否经历过一次退后台（首次 onStart 不重复拨号，交由 onCreate 处理） */
+    private var wentBackground = false
+
     // API Key 仅存本机（明文），不写入源码或 APK
     private val prefs by lazy { getSharedPreferences("mmd_prefs", MODE_PRIVATE) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // ★ 统一日志开关（默认关；--ez log true 开启；debug 包默认开）
+        val logFlag = if (intent?.hasExtra("log") == true)
+            intent.getBooleanExtra("log", false) else null
+        val logging = L.init(logFlag)
 
         localVad = LocalVad { prob -> controller?.onMonitorSpeech(prob > 0.5f) }
         audioSrc = intent?.getIntExtra("src", MediaRecorder.AudioSource.VOICE_COMMUNICATION)
@@ -126,9 +152,9 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         if (useNnAec) {
             try {
                 dtlnAec = DtlNAec(this, intent?.getIntExtra("feDelayMs", 150) ?: 150)
-                Log.i(TAG, "已启用 DTLN 神经网络 AEC（echo-cancel）+ far-end 延迟 ${intent?.getIntExtra("feDelayMs", 150) ?: 150}ms")
+                L.i(TAG, "已启用 DTLN 神经网络 AEC（echo-cancel）+ far-end 延迟 ${intent?.getIntExtra("feDelayMs", 150) ?: 150}ms")
             } catch (e: Throwable) {
-                Log.e(TAG, "DTLN AEC 初始化失败，降级：${e.message}")
+                L.e(TAG, "DTLN AEC 初始化失败，降级：${e.message}")
                 dtlnAec = null
             }
         }
@@ -142,21 +168,21 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                 silentFrame = ByteArray(640),
                 agc = softwareAgc,
             )
-            Log.i(TAG, "上行门控已启用: 回声系数=${(intent?.getIntExtra("echoGain", 45) ?: 45) / 1000.0} 倍数=${(intent?.getIntExtra("gateRatio", 16) ?: 16) / 10.0}")
+            L.i(TAG, "上行门控已启用: 回声系数=${(intent?.getIntExtra("echoGain", 45) ?: 45) / 1000.0} 倍数=${(intent?.getIntExtra("gateRatio", 16) ?: 16) / 10.0}")
         } else {
-            Log.i(TAG, "上行门控已禁用（AGC 仍生效）")
+            L.i(TAG, "上行门控已禁用（AGC 仍生效）")
         }
         softwareAgc.reset()
-        Log.i(TAG, "音频配置: source=$audioSrc usage=$audioUsage")
+        L.i(TAG, "音频配置: source=$audioSrc usage=$audioUsage")
         // [离线标定] 三路录音落盘（仅在带 --ez dumpAudio true 启动时开启，正式版不影响）
-        if (intent?.getBooleanExtra("dumpAudio", false) == true) {
+        if (logging && intent?.getBooleanExtra("dumpAudio", false) == true) {
             try {
                 val dir = getExternalFilesDir(null) ?: filesDir
                 dumpRaw = java.io.FileOutputStream(java.io.File(dir, "mic_raw.pcm"))
                 dumpClean = java.io.FileOutputStream(java.io.File(dir, "mic_clean.pcm"))
                 dumpRender = java.io.FileOutputStream(java.io.File(dir, "far_end.pcm"))
-                Log.i(TAG, "离线标定录音中 → ${dir.absolutePath}/{mic_raw,mic_clean,far_end}.pcm")
-            } catch (e: Exception) { Log.w(TAG, "dump open failed: ${e.message}") }
+                L.i(TAG, "离线标定录音中 → ${dir.absolutePath}/{mic_raw,mic_clean,far_end}.pcm")
+            } catch (e: Exception) { L.w(TAG, "dump open failed: ${e.message}") }
         }
         bargeVad = LocalVad { prob -> onBargeVad(prob) }
         controller = AutoCallController(object : AutoCallController.Callbacks {
@@ -165,10 +191,39 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
             override fun requestStartMonitoring() = startMonitoring()
             override fun requestStopMonitoring() = stopMonitoring()
             override fun onStateChanged(label: String) { setStatus(label) }
-            override fun isAiSpeaking() = aiResponding   // ★ 播报中不计入闲置
+            // ★ 播报中不算闲置：服务端在生成 或 按音频字节推算播放尚未结束
+            override fun isAiSpeaking() = aiResponding || aiPlaybackOngoing()
+
+            /**
+             * ★ 按「已收到音频字节数 ÷ 实时速率」推算播放终点。
+             * 服务端 3011(TTS_ENDED) 只表示数据下发完毕；长回复时数据一次传完，
+             * 播放器仍要播几十上百秒，必须按字节数推算才不会误判"播报已结束"。
+             */
+            fun aiPlaybackOngoing(): Boolean {
+                val endAt = aiPlaybackEndsAt
+                if (endAt == 0L) return false
+                val ongoing = System.currentTimeMillis() < endAt
+                if (!ongoing && !playbackEndLogged) {
+                    playbackEndLogged = true
+                    L.i(TAG, "★ 推算播放已结束 → 闲置计时从此刻起算")
+                }
+                return ongoing
+            }
         })
 
         applyLayout()
+        // ★ 启动即应用配置的「静默挂断秒数」（0 = 关闭自动模式；替代原自动模式开关）
+        runCatching {
+            val secCfg = prefs.getInt(KEY_SILENCE_SEC, AutoCallController.DEFAULT_IDLE_SILENCE_SEC)
+            if (secCfg <= 0) {
+                controller?.idleSilenceMs = 0L
+                controller?.enabled = false
+                L.i(TAG, "启动配置：静默挂断秒数=0 → 自动模式关闭")
+            } else {
+                controller?.idleSilenceMs = secCfg * 1000L
+                L.i(TAG, "启动配置：静默挂断秒数=$secCfg → 自动模式开，阈值 ${secCfg * 1000}ms")
+            }
+        }
 
         // ★ 只检查官方 SDK 的三件套凭据（不再用旧链路的 apiKey()，否则会误弹设置框）
         val (cid, ckey, ctoken) = creds3()
@@ -225,6 +280,10 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                 }
                 this.hint = hint
                 setSingleLine(true)
+                // ★ 紧凑：缩小上下内边距与最小高度（手机屏竖向空间有限）
+                val dpx = (3 * resources.displayMetrics.density).toInt()
+                setPadding(0, dpx, 0, dpx)
+                minimumHeight = (30 * resources.displayMetrics.density).toInt()
                 setTextColor(getColor(R.color.text_primary))
                 setHintTextColor(getColor(R.color.text_secondary))
                 setText(value)
@@ -235,47 +294,91 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                 }
                 layoutParams = lp
             }
+        val curAK = prefs.getString(PREF_KEY, "").orEmpty()
         val e1 = field("App ID", curA, secret = true)
         val e2 = field("App Key", curK, secret = true)
         val e3 = field("Access Token", curT, secret = true)
+        // ★ 新版鉴权（双工协议必需）：API Key
+        val e4 = field("API Key（双工协议必需）", curAK, secret = true)
+        // 名称与输入框【同一行】：左标题固定比例，右输入框占余下宽度，避免换行
+        fun row(name: String, f: android.widget.EditText) =
+            android.widget.LinearLayout(this).apply {
+                orientation = android.widget.LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(0, (2 * resources.displayMetrics.density).toInt(), 0, 0)
+                addView(android.widget.TextView(this@MainActivity).apply {
+                    text = name
+                    textSize = 12f
+                    setTextColor(getColor(R.color.text_secondary))
+                    isSingleLine = true
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 0.36f
+                    )
+                })
+                addView(f, android.widget.LinearLayout.LayoutParams(
+                    0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 0.64f
+                ))
+            }
 
-        // ★ 自动模式开关（从主界面移入设置）
-        val swAutoDlg = android.widget.Switch(this).apply {
-            text = "自动模式（静默 10s 挂断 / 说话即重拨）"
-            textSize = 14f
+        // ★ 静默挂断秒数（替代原「自动模式」开关；0 = 关闭自动模式）
+        val curSec = prefs.getInt(KEY_SILENCE_SEC, AutoCallController.DEFAULT_IDLE_SILENCE_SEC)
+        val e5 = android.widget.EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            this.hint = "10"
+            setSingleLine(true)
+            val dpx2 = (3 * resources.displayMetrics.density).toInt()
+            setPadding(0, dpx2, 0, dpx2)
+            minimumHeight = (30 * resources.displayMetrics.density).toInt()
             setTextColor(getColor(R.color.text_primary))
-            isChecked = controller?.enabled ?: true
-            layoutParams = lp
+            setHintTextColor(getColor(R.color.text_secondary))
+            setText(curSec.toString())
         }
 
         val pad = (24 * resources.displayMetrics.density).toInt()
         val box = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
-            setPadding(pad, pad / 2, pad, 0)
-            addView(e1); addView(e2); addView(e3); addView(swAutoDlg)
+            setPadding(pad, pad / 6, pad, 0)
+            addView(row("App ID", e1))
+            addView(row("App Key", e2))
+            addView(row("Access Token", e3))
+            addView(row("API Key（双工）", e4))
+            addView(row("静默挂断秒数", e5))
         }
+        // 字段变多，用 ScrollView 包裹避免小屏被裁切
+        val boxScroll = android.widget.ScrollView(this).apply { addView(box) }
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("设置")
             .setMessage("凭据仅存本机，不写入 APK（显示为星号）。")
-            .setView(box)
+            .setView(boxScroll)
             .setPositiveButton("保存") { _, _ ->
                 prefs.edit()
                     .putString(KEY_APPID, e1.text.toString().trim())
                     .putString(KEY_APPKEY, e2.text.toString().trim())
                     .putString(KEY_TOKEN, e3.text.toString().trim())
+                    .putString(PREF_KEY, e4.text.toString().trim())
                     .apply()
-                controller?.enabled = swAutoDlg.isChecked
-                appendSystem(if (swAutoDlg.isChecked) "自动模式：开" else "自动模式：关（回到手动）")
+                // ★ 应用静默挂断秒数（0 = 关闭自动模式）
+                val secIn = e5.text.toString().trim().toIntOrNull()
+                    ?: AutoCallController.DEFAULT_IDLE_SILENCE_SEC
+                prefs.edit().putInt(KEY_SILENCE_SEC, secIn).apply()
+                applySilenceSec(secIn)
                 refreshKeyStatus()
                 appendSystem("设置已保存")
             }
             .setNeutralButton("清空") { _, _ ->
-                prefs.edit().remove(KEY_APPID).remove(KEY_APPKEY).remove(KEY_TOKEN).apply()
+                prefs.edit().remove(KEY_APPID).remove(KEY_APPKEY).remove(KEY_TOKEN).remove(PREF_KEY).apply()
                 refreshKeyStatus()
                 appendSystem("凭据已清空")
             }
             .setNegativeButton("取消", null)
             .show()
+            .also { d ->
+                // ★ 加宽弹框（88% 屏宽），避免按钮被挤到可视区外
+                d.window?.setLayout(
+                    (resources.displayMetrics.widthPixels * 0.88).toInt(),
+                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            }
     }
 
     // ---------- UI 绑定（支持横竖屏切换重建）----------
@@ -294,10 +397,19 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         btnCall.setOnClickListener { if (callActive) hangup() else startCall() }
         btnClose.setOnClickListener { exitApp() }
         btnSettings.setOnClickListener { promptForKey() }
+        // ★ 启动自检：双工协议需要 API Key，缺失时明确提示
+        if (prefs.getString(PREF_KEY, "").orEmpty().isBlank()) {
+            main.postDelayed({
+                if (prefs.getString(PREF_KEY, "").orEmpty().isBlank()) {
+                    setStatus("⚠️ 未配置 API Key —— 点右上角 ⚙ 填写后才能听到你说话")
+                    appendSystem("⚠️ 未检测到 API Key。双工协议使用新版鉴权（API Key + App Key），缺少 API Key 时不会识别你的语音。请点右上角 ⚙ → 在「API Key（双工）」一行填入，保存。")
+                }
+            }, 1200)
+        }
 
         updateCallUi()
         render()
-        if (lastStatus.isNotEmpty()) statusTv.text = lastStatus
+        if (lastStatus.isNotEmpty()) statusTv.text = displayStatus()
         startAvatar()
     }
 
@@ -309,7 +421,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
             c.systemBarsBehavior =
                 androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         } catch (e: Exception) {
-            Log.w(TAG, "hideStatusBar failed: ${e.message}")
+            L.w(TAG, "hideStatusBar failed: ${e.message}")
         }
     }
 
@@ -328,6 +440,8 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                 android.content.res.ColorStateList.valueOf(getColor(R.color.bg_top))
             btnCall.alpha = 1f
         }
+        // ★ 通话状态变化时同步刷新状态文案（通话中 / 待唤醒）
+        if (::statusTv.isInitialized) statusTv.text = displayStatus()
     }
 
     private fun toggleOrientation() {
@@ -378,7 +492,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                 prepareAsync()
             }
         } catch (e: Exception) {
-            Log.w(TAG, "avatar play failed: ${e.message}"); null
+            L.w(TAG, "avatar play failed: ${e.message}"); null
         }
     }
 
@@ -395,7 +509,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
             val v = LocalVad { p -> total++; if (p > 0.5f) speech++ }
             v.feed(pcm)
             v.release()
-            Log.i(
+            L.i(
                 TAG,
                 "VAD self-test: frames=$total speechFrames=$speech ratio=" +
                         "${if (total > 0) speech * 100 / total else 0}%"
@@ -423,7 +537,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         localVad?.flush()
         monitorCapture = AudioCapture { frame -> localVad?.feed(frame) }
         val ok = monitorCapture?.start() ?: false
-        Log.i(TAG, "monitor capture started=$ok")
+        L.i(TAG, "monitor capture started=$ok")
         if (!ok) {
             monitorCapture = null
             appendSystem("监听：麦克风不可用")
@@ -439,7 +553,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         Thread {
             try { Thread.sleep(2500) } catch (_: InterruptedException) { return@Thread }
             if (controller?.state != AutoCallController.State.MONITORING) return@Thread
-            Log.i(TAG, "DEBUG: simulate user speech → feed VAD")
+            L.i(TAG, "DEBUG: simulate user speech → feed VAD")
             monitorCapture?.stop(); monitorCapture = null
             val pcm = loadAsset("test_input.pcm") ?: return@Thread
             var off = 0
@@ -469,10 +583,84 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
 
     private var dialogEngine: com.bytedance.speech.speechengine.SpeechEngine? = null
     private var dialogStarted = false
+    /**
+     * ★ 一轮 AI 回复的三段内容（均已剥离括号），按决策 A1/B1/C1 归属：
+     *   brace  {...}  → 用户气泡第二行（白字，用户内容的英文翻译）
+     *   bracket[...]  → AI 气泡第一行（黑字，英文对答）
+     *   corner 【...】 → AI 气泡第二行（灰字，中文翻译）
+     */
+    private class AiTurn {
+        val brace = StringBuilder()
+        val bracket = StringBuilder()
+        val corner = StringBuilder()
+        var seg = 0        // 0=段外 1=brace 2=bracket 3=corner
+        /** ★ 该轮回复对应的「用户气泡序号」；-1 表示前面没有用户发言（如开场白） */
+        var userIdx = -1
+    }
+    private val aiTurnList = ArrayList<AiTurn>()
+    /** 系统提示（灰字气泡，渲染在末尾） */
+    private val systemMsgs = ArrayList<String>()
+
+    /** 当前已完成的用户发言条数（userBuf 中的非空行） */
+    private fun countUserTurns(): Int =
+        userBuf.toString().split("\n").count { it.isNotBlank() }
+
+    /** 把流式增量喂进三段解析器（只拆段，不改动任何流式时序） */
+    private fun feedAiText(delta: String) {
+        if (aiTurnList.isEmpty()) {
+            val t0 = AiTurn()
+            t0.userIdx = countUserTurns() - 1
+            aiTurnList.add(t0)
+        }
+        for (ch in delta) {
+            // 新的 { 且上一轮已有内容 → 视为新一轮回复
+            if (ch == '{' && (aiTurnList.last().bracket.isNotEmpty() ||
+                        aiTurnList.last().corner.isNotEmpty())) {
+                val nt = AiTurn()
+                // ★ 显式关联到「此刻已完成的最后一条用户发言」。
+                //   开场白没有前置用户发言 → userIdx=-1，不会再挤占后续索引导致整体错位。
+                nt.userIdx = countUserTurns() - 1
+                aiTurnList.add(nt)
+            }
+            val t = aiTurnList.last()
+            when (ch) {
+                '{' -> t.seg = 1
+                '}' -> if (t.seg == 1) t.seg = 0
+                '[' -> t.seg = 2
+                ']' -> if (t.seg == 2) t.seg = 0
+                '【' -> t.seg = 3
+                '】' -> if (t.seg == 3) t.seg = 0
+                else -> when (t.seg) {
+                    1 -> t.brace.append(ch)
+                    2 -> t.bracket.append(ch)
+                    3 -> t.corner.append(ch)
+                }
+            }
+        }
+    }
+
     /** 最近一次 ASR 转写文本（用于 ASR_ENDED 时兜底 flush final） */
     private var lastAsrText = ""
     /** 上一次 ASR 分发是否为已定稿（避免 ASR_ENDED 重复 flush） */
     private var lastAsrWasFinal = false
+
+    /**
+     * ★ 应用「静默挂断秒数」：>0 → 开自动模式并设置阈值；=0 → 关闭自动模式。
+     * 该值替代了原来的「自动模式」开关（单一事实来源）。
+     */
+    private fun applySilenceSec(sec: Int) {
+        val c = controller ?: return
+        if (sec <= 0) {
+            c.enabled = false
+            appendSystem("⏹ 自动模式：关（静默挂断秒数 = 0）")
+            L.i(TAG, "静默挂断秒数=0 → 关闭自动模式")
+        } else {
+            c.idleSilenceMs = sec * 1000L
+            c.enabled = true
+            appendSystem("▶️ 自动模式：开（双方静默 ${sec}s 自动挂断；待机零费用）")
+            L.i(TAG, "静默挂断秒数=$sec → 自动模式开，阈值 ${sec * 1000}ms")
+        }
+    }
 
     private fun creds3(): Triple<String, String, String> {
         val appid = prefs.getString(KEY_APPID, null)?.takeIf { it.isNotBlank() }
@@ -481,6 +669,37 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
             ?: ""
         val token = prefs.getString(KEY_TOKEN, "") ?: ""
         return Triple(appid, appkey, token)
+    }
+
+    // ---------- 内置提示词：外部文件覆盖（adb 可改，改后下次启动生效）----------
+    //
+    // 路径：<应用外部私有目录>/sys_prompt.txt（即 /sdcard/Android/data/<包名>/files/sys_prompt.txt）
+    // 规则：
+    //   * 文件不存在 → 首次启动用内置默认 SYSTEM_PROMPT 写入该文件
+    //   * 文件存在且非空 → 使用文件内容作为提示词
+    //   * 文件为空 → 回退内置默认
+    // adb 修改：push 覆盖该文件即可；删除该文件则下次启动恢复默认。不提供界面配置入口。
+    private val promptFile by lazy {
+        java.io.File(getExternalFilesDir(null) ?: filesDir, "sys_prompt.txt")
+    }
+
+    private fun effectivePrompt(): String = try {
+        if (!promptFile.exists()) {
+            promptFile.writeText(SYSTEM_PROMPT, Charsets.UTF_8)
+            L.i(TAG, "首次创建提示词文件 → ${promptFile.absolutePath}")
+        }
+        val t = promptFile.readText(Charsets.UTF_8).trim()
+        if (t.isNotEmpty()) t else SYSTEM_PROMPT
+    } catch (e: Exception) {
+        L.w(TAG, "读取提示词文件失败，回退内置默认：${e.message}")
+        SYSTEM_PROMPT
+    }
+
+    /** 本次启动实际生效的提示词（惰性求值一次；外部文件优先） */
+    private val activePrompt: String by lazy {
+        effectivePrompt().also {
+            L.i(TAG, "生效提示词长度=${it.length} 来源=${if (it == SYSTEM_PROMPT) "内置默认" else "外部文件"} 文件=${promptFile.absolutePath}")
+        }
     }
 
     private fun startOfficialDialog() {
@@ -492,17 +711,24 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         // 诊断：MD5 摘要（只输出哈希，不泄露凭据原值）
         fun md5(s: String): String = java.security.MessageDigest.getInstance("MD5")
             .digest(s.toByteArray()).joinToString("") { "%02x".format(it.toInt() and 0xFF) }
-        Log.i(TAG, "凭据读取: appid=$appid appkey长度=${appkey.length} token长度=${token.length} 来源=${
+        L.i(TAG, "凭据读取: appid=$appid appkey长度=${appkey.length} token长度=${token.length} 来源=${
             if (intent?.getStringExtra("appkey") != null) "intent" else "prefs"
         }")
-        Log.i(TAG, "凭据MD5: appid=${md5(appid)} appkey=${md5(appkey)} token=${md5(token)}")
+        L.i(TAG, "凭据MD5: appid=${md5(appid)} appkey=${md5(appkey)} token=${md5(token)}")
         if (token.isBlank()) {
             setStatus("⚠️ 请先在设置中填写 Access Token")
             promptForKey()
             return
         }
-        userBuf.setLength(0); aiBuf.setLength(0); userCur = ""; lastAsrText = ""; lastAsrWasFinal = false
-        aiResponding = false; bargeArmed = false
+        // ★ 彻底重置对话状态（B2：每次拨号=全新对话，界面清空 + 云端本就是新会话天然不记忆）
+        //   关键：必须连同 aiTurnList / systemMsgs 一起清。旧实现只清 userBuf 却留着
+        //   aiTurnList → 旧 AI 气泡残留、新用户气泡被顶到顶部、旧用户气泡消失（历史 bug）。
+        userBuf.setLength(0); aiBuf.setLength(0); userCur = ""
+        lastAsrText = ""; lastAsrWasFinal = false; receivedAudioBytes = 0
+        aiTurnList.clear(); systemMsgs.clear()
+        bargeHeadBuf.setLength(0)
+        aiResponding = false; bargeArmed = false; dropAudio = false; bargeSilenceSeen = false
+        bargeVad?.flush()
         render()
         setStatus("初始化引擎…")
         Thread {
@@ -520,11 +746,61 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                 // ★ Token 必须带固定前缀 "Bearer;"（官方文档要求）；用户填的是原始值，此处补齐
                 val tokenBearer = if (token.startsWith("Bearer;")) token else "Bearer;$token"
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_TOKEN_STRING, tokenBearer)
-                Log.i(TAG, "token 加前缀后长度=${tokenBearer.length}（原=${token.length}）")
-                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_RESOURCE_ID_STRING, "volc.speech.dialog")
+                L.i(TAG, "token 加前缀后长度=${tokenBearer.length}（原=${token.length}）")
+                // 协议：0=默认 1=SEED 2=SEED_DUPLEX（官方提示词仅双工协议支持）
+                val protoType = intent?.getIntExtra("protocol", 0) ?: 0
+                e.setOptionInt(SpeechEngineDefines.PARAMS_KEY_PROTOCOL_TYPE_INT, protoType)
+                // 鉴权：new(api_key+appkey，官方双工同款) | old(appid/appkey/token)
+                val authMode = intent?.getStringExtra("authMode") ?: "new"
+                // 凭据来源：Intent（调试）> 设置页保存值（正常使用，唯一持久来源）
+                val apiKeyVal = intent?.getStringExtra("apiKey")
+                    ?.takeIf { it.isNotBlank() }
+                    ?: prefs.getString("volc_api_key", "").orEmpty()
+                if (authMode == "new") {
+                    e.setOptionString(SpeechEngineDefines.PARAMS_KEY_API_KEY_STRING, apiKeyVal)
+                    e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_KEY_STRING, appkey)
+                    L.i(TAG, "新版鉴权: apiKey长度=${apiKeyVal.length} appkey长度=${appkey.length}")
+                } else {
+                    e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_ID_STRING, appid)
+                    e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_KEY_STRING, appkey)
+                    val tb = if (token.startsWith("Bearer;")) token else "Bearer;$token"
+                    e.setOptionString(SpeechEngineDefines.PARAMS_KEY_APP_TOKEN_STRING, tb)
+                    L.i(TAG, "旧版鉴权: appid=$appid token长度=${tb.length}")
+                }
+                val resourceId = intent?.getStringExtra("resourceId") ?: "volc.speech.dialog"
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_RESOURCE_ID_STRING, resourceId)
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_DIALOG_ADDRESS_STRING, "wss://openspeech.bytedance.com")
-                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_DIALOG_URI_STRING, "/api/v3/realtime/dialogue")
+                val dialogUri = intent?.getStringExtra("uri") ?: "/api/v3/realtime/dialogue"
+                // ★ 开启播放器音频回调：SDK 会把【播放音频】通过 3018 送进来。
+                //   注意本协议不下发 3019/3020 事件，我们只用 3018 的【字节数】
+                //   推算播放终点（绝不构造 String / 打日志，否则会拖死应用）。
+                e.setOptionBoolean(
+                    SpeechEngineDefines.PARAMS_KEY_DIALOG_ENABLE_PLAYER_AUDIO_CALLBACK_BOOL, true
+                )
+                // ★ SDK 自身日志（C1）：随统一开关；默认只留 ERROR，开启时 TRACE + 落盘
+                e.setOptionString(
+                    SpeechEngineDefines.PARAMS_KEY_LOG_LEVEL_STRING,
+                    if (L.enabled) SpeechEngineDefines.LOG_LEVEL_TRACE
+                    else SpeechEngineDefines.LOG_LEVEL_ERROR
+                )
+                if (L.enabled) {
+                    val dbgDir = (getExternalFilesDir(null) ?: filesDir).absolutePath
+                    e.setOptionString(SpeechEngineDefines.PARAMS_KEY_DEBUG_PATH_STRING, dbgDir)
+                }
+                e.setOptionString(SpeechEngineDefines.PARAMS_KEY_DIALOG_URI_STRING, dialogUri)
                 e.setOptionString(SpeechEngineDefines.PARAMS_KEY_RECORDER_TYPE_STRING, SpeechEngineDefines.RECORDER_TYPE_RECORDER)
+                L.i(TAG, "配置: protocol=$protoType auth=$authMode rid=$resourceId uri=$dialogUri")
+                // ★ 新版鉴权必须有 API Key，否则上行链路不生效（表现为"说话没反应"）
+                if (authMode == "new" && apiKeyVal.isBlank()) {
+                    L.e(TAG, "缺少 API Key！新版鉴权（双工协议）必需，请到设置页填写")
+                    main.post {
+                        setStatus("❌ 缺少 API Key —— 请点右上角 ⚙ 填写「API Key（双工）」后保存")
+                        appendSystem("⚠️ 缺少 API Key：双工协议的新版鉴权必需。请打开 ⚙ 设置，在「API Key（双工）」一行填入你的 API Key，点保存。")
+                        updateCallUi()
+                    }
+                    return@Thread
+                }
+                if (authMode == "new") L.i(TAG, "API Key 已配置（长度 ${apiKeyVal.length}）")
                 // 内置 AEC（模型从 assets 释放）
                 val dir = applicationContext.getExternalFilesDir(null) ?: filesDir
                 val model = java.io.File(dir, "aec.model")
@@ -533,7 +809,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                         assets.open("testdata/aec/aec.model").use { i ->
                             model.outputStream().use { o -> i.copyTo(o) }
                         }
-                    } catch (t: Throwable) { Log.w(TAG, "释放 AEC 模型失败: ${t.message}") }
+                    } catch (t: Throwable) { L.w(TAG, "释放 AEC 模型失败: ${t.message}") }
                 }
                 e.setOptionBoolean(SpeechEngineDefines.PARAMS_KEY_ENABLE_AEC_BOOL, true)
                 if (model.exists()) {
@@ -542,7 +818,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                 e.setContext(applicationContext)
                 e.setListener(this)
                 val ret = e.initEngine()
-                Log.i(TAG, "SDK initEngine = $ret")
+                L.i(TAG, "SDK initEngine = $ret")
                 if (ret != 0) {
                     main.post { setStatus("❌ 引擎初始化失败 ret=$ret") }
                     return@Thread
@@ -553,32 +829,19 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                     SpeechEngineDefines.DIRECTIVE_SYNC_STOP_ENGINE,
                     """{"type":"session.close","event_id":"event_close"}"""
                 )
-                // ★ 模型版本：官方 demo 用 1.2.1.1（1.2.6.1 服务端 Unauthorized）
-                val modelVer = intent?.getStringExtra("model") ?: "1.2.1.1"
-                // ★ 用 session.create 事件承载 instructions（与 V2.X 生效版本一致）
-                //   仅传 {"dialog":{...}} 时 instructions 无法下发 → 提示词不生效
-                val sessionObj = org.json.JSONObject()
-                    .put("model", modelVer)
-                    .put("instructions", SYSTEM_PROMPT)
-                    .put("tools", org.json.JSONArray())
-                    .put(
-                        "audio", org.json.JSONObject()
-                            .put("input", org.json.JSONObject()
-                                .put("format", org.json.JSONObject().put("type", "pcm").put("rate", 16000)))
-                            .put("output", org.json.JSONObject()
-                                .put("format", org.json.JSONObject().put("type", "pcm_s16le").put("rate", 24000)))
-                    )
-                val createJson = org.json.JSONObject()
-                    .put("type", "session.create")
-                    .put("event_id", java.util.UUID.randomUUID().toString())
-                    .put("session", sessionObj)
-                    .put("extension", org.json.JSONObject()
-                        .put("extra", org.json.JSONObject().put("enable_proactive_speak", false))
-                        .put("dialog", org.json.JSONObject().put("extra", org.json.JSONObject())))
+                // ★ 参考 temp-speech-digital：默认协议 dialog 载荷 + system_role（内置提示词）
+                val modelVer2 = intent?.getStringExtra("model") ?: "1.2.1.1"
+                val startJson = org.json.JSONObject()
+                    .put("dialog", org.json.JSONObject()
+                        .put("extra", org.json.JSONObject()
+                            .put("input_mod", "keep_alive")
+                            .put("model", modelVer2))
+                        .put("bot_name", "豆包")
+                        .put("system_role", activePrompt))
                     .toString()
-                Log.i(TAG, "START_ENGINE payload model=$modelVer instructionsLen=${SYSTEM_PROMPT.length}")
-                val r2 = e.sendDirective(SpeechEngineDefines.DIRECTIVE_START_ENGINE, createJson)
-                Log.i(TAG, "SDK START_ENGINE = $r2")
+                L.i(TAG, "START_ENGINE payload(dialog+system_role) model=$modelVer2 instrLen=${activePrompt.length}")
+                val r2 = e.sendDirective(SpeechEngineDefines.DIRECTIVE_START_ENGINE, startJson)
+                L.i(TAG, "SDK START_ENGINE = $r2")
                 dialogStarted = r2 == 0
                 // ★ 注意：callActive 不在此处置位！START_ENGINE 只是"指令被接受"，
                 //   服务端会话尚未建立（EVT[3003] 通常晚 0.4~0.8s）。
@@ -588,7 +851,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                     render()
                 }
             } catch (t: Throwable) {
-                Log.e(TAG, "SDK start failed", t)
+                L.e(TAG, "SDK start failed", t)
                 main.post { setStatus("❌ 异常: ${t.message}") }
             }
         }.start()
@@ -596,16 +859,44 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
 
     /** 官方 SDK 回调 → 复用原有的 UI/字幕/状态更新逻辑 */
     override fun onSpeechMessage(type: Int, data: ByteArray?, len: Int) {
+        // ★★ 3018 = 播放音频本体（二进制）。必须在构造 String 之前拦截：
+        //    1) 每帧几百 KB，String 转换会拖死应用（实测直接导致退出）
+        //    2) 二进制转 String 会破坏字节计数，必须用回调给出的真实长度 len
+        if (type == SpeechEngineDefines.MESSAGE_TYPE_DIALOG_PLAYER_AUDIO) {
+            if (aiAudioFirstAt == 0L) aiAudioFirstAt = System.currentTimeMillis()
+            aiAudioBytesTotal += len.toLong()
+            playerAudioFrames++
+            playerAudioBytes += len.toLong()
+            return
+        }
         val raw = data?.let { String(it, 0, minOf(len, it.size)) } ?: ""
         when (type) {
             SpeechEngineDefines.MESSAGE_TYPE_DIALOG_SESSION_STARTED -> {
-                Log.i(TAG, "会话建立: $raw")
+                L.i(TAG, "会话建立: $raw")
                 val sid = runCatching {
                     org.json.JSONObject(raw).optString("dialog_id")
                 }.getOrNull()
                 onSessionCreated(sid)
             }
+            // ★ 3029 = 下行事件（双工协议专用）：session.created / session.updated 都在这里
+            SpeechEngineDefines.MESSAGE_TYPE_DIALOG_DOWNLINK_EVENT -> {
+                L.i(TAG, "EVT[3029] 下行事件: $raw")
+                try {
+                    val o = org.json.JSONObject(raw)
+                    when (o.optString("type")) {
+                        "session.created" -> {
+                            val sid = o.optJSONObject("session")?.optString("id")
+                            L.i(TAG, "★ 双工会话建立 session.id=$sid")
+                            onSessionCreated(sid)
+                        }
+                        "session.updated" -> L.i(TAG, "★ session.update 已确认（提示词已生效）")
+                        "session.closed" -> L.i(TAG, "会话已关闭")
+                        else -> {}
+                    }
+                } catch (t: Throwable) { L.w(TAG, "解析 3029 失败: ${t.message}") }
+            }
             SpeechEngineDefines.MESSAGE_TYPE_DIALOG_ASR_RESPONSE -> {
+                controller?.onSpeechSignal()   // ★ 3013 增量即讲话迹象
                 runCatching {
                     val o = org.json.JSONObject(raw)
                     val r0 = o.optJSONArray("results")?.optJSONObject(0)
@@ -617,7 +908,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                     val isFinal = !isInterim && endpoint
                     if (txt.isNotEmpty()) {
                         val score = extra?.optDouble("interrupt_score", 0.0) ?: 0.0
-                        Log.i(TAG, "ASR: $txt (isInterim=$isInterim endpoint=$endpoint final=$isFinal " +
+                        L.i(TAG, "ASR: $txt (isInterim=$isInterim endpoint=$endpoint final=$isFinal " +
                                 "score=$score aiSpeaking=$aiResponding)")
                         lastAsrText = txt
                         lastAsrWasFinal = isFinal
@@ -626,36 +917,119 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
                 }
             }
             SpeechEngineDefines.MESSAGE_TYPE_DIALOG_ASR_ENDED -> {
-                onAudioDone()
+                // ★ 3014 只代表「用户这一轮 ASR 结束」，与 AI 音频无关！
+                //   绝不能调用 onAudioDone()（那会把 aiResponding 误清为 false，
+                //   导致 AI 长回复期间被判"AI未播报"而提前挂断）
+                controller?.onSpeechSignal()
+                aiRespondingNote("3014 ASR_ENDED")
                 // 兜底：若 endpoint 未置位导致整句漏判，ASR 结束时补一次 final
                 if (lastAsrText.isNotEmpty() && !lastAsrWasFinal) {
-                    Log.i(TAG, "ASR ended → 兜底 flush final: $lastAsrText")
+                    L.i(TAG, "ASR ended → 兜底 flush final: $lastAsrText")
                     onUserText(lastAsrText, true)
                 }
                 lastAsrText = ""
                 lastAsrWasFinal = false
             }
-            SpeechEngineDefines.MESSAGE_TYPE_DIALOG_TTS_SENTENCE_START -> onAudioStarted()
-            SpeechEngineDefines.MESSAGE_TYPE_DIALOG_TTS_RESPONSE -> {
-                // ★ 关键：刷新状态机的「AI 有音频」时间戳
-                //   否则 AI 播报期间 lastAiAudio 不更新 → 被误判"静默超时"而错误挂断
-                controller?.onAiAudio()
+            // ★ 3008 AI 开始说 → 讲话迹象 + 重置兜底计时
+            SpeechEngineDefines.MESSAGE_TYPE_DIALOG_TTS_SENTENCE_START -> {
+                controller?.onSpeechSignal()
+                controller?.onActivityStart()
+                onAudioStarted()
             }
-            SpeechEngineDefines.MESSAGE_TYPE_DIALOG_TTS_ENDED -> onAudioDone()
+            // ★ 3010 AI 播报音频 → 讲话迹象（播报期间持续刷新，闲置计时自然不会走）
+            SpeechEngineDefines.MESSAGE_TYPE_DIALOG_TTS_RESPONSE -> {
+                controller?.onSpeechSignal()
+            }
+            // ★ 3011 TTS_ENDED = 「服务端产出结束」→ 清 aiResponding（这个语义是对的）。
+            //   注意：此时播放器可能还在播（长回复数据先一次传完），
+            //   这部分由 aiPlaybackOngoing()（字节推算）继续兜住 isAiSpeaking()。
+            SpeechEngineDefines.MESSAGE_TYPE_DIALOG_TTS_ENDED -> {
+                aiResponding = false
+                controller?.onSpeechSignal()
+                // ★ 用【服务端声明的音频时长】算播放终点，而非数 3018 字节。
+                //   实测：数据是"快于实时"灌下来的（10.2s 传完 52.8s 音频），
+                //   且 3018 字节数严重少算（约 1/5），两者都会导致终点偏早 → AI 被掐断。
+                //   播放始终是实时速率，故：终点 = 播放起点 + 声明时长 + 余量。
+                val anchor = if (aiAudioFirstAt > 0) aiAudioFirstAt else aiTurnStartedAt
+                val durMs = aiAudioDurationMs
+                aiPlaybackEndsAt =
+                    if (durMs > 0 && anchor > 0) anchor + durMs + AI_PLAY_MARGIN_MS else 0L
+                L.i(
+                    TAG,
+                    "EVT[3011] 服务端产出结束 → aiResponding=false；服务端声明时长=${durMs}ms " +
+                            "播放起点偏移=${System.currentTimeMillis() - anchor}ms → " +
+                            "播放终点=+${(aiPlaybackEndsAt - System.currentTimeMillis()).coerceAtLeast(0)}ms"
+                )
+            }
+            // ★ 3009 TTS_SENTENCE_END：服务端声明该句音频时长（秒）→ 换算 ms。
+            //   这是【权威】的播放时长来源；实测按 3018 数字节会严重少算（约 1/5）。
+            SpeechEngineDefines.MESSAGE_TYPE_EVENT_TTS_SENTENCE_END -> {
+                runCatching {
+                    val sd = org.json.JSONObject(raw).optJSONObject("sentence_duration")
+                    val endSec = sd?.optDouble("sentence_end_time", 0.0) ?: 0.0
+                    if (endSec > 0) {
+                        val ms = (endSec * 1000).toLong()
+                        if (ms > aiAudioDurationMs) aiAudioDurationMs = ms
+                        L.i(TAG, "EVT[3009] 服务端声明音频时长=${ms}ms（累计=${aiAudioDurationMs}ms）")
+                    }
+                }
+            }
+            // ★ 3019 播放器真正开始播放
+            SpeechEngineDefines.MESSAGE_TYPE_PLAYER_START_PLAY_AUDIO -> {
+                aiResponding = true
+                controller?.onSpeechSignal()
+                L.i(TAG, "EVT[3019] 播放器开始播放 → aiResponding=true")
+            }
+            // ★★ 3020 播放器真正播放完成 ← 这才是「AI 播报结束」的权威信号
+            SpeechEngineDefines.MESSAGE_TYPE_PLAYER_FINISH_PLAY_AUDIO -> {
+                aiResponding = false
+                controller?.onSpeechSignal()
+                L.i(
+                    TAG,
+                    "EVT[3020] 播放器播放完成 → aiResponding=false（闲置计时从此刻起算）" +
+                            " 本轮播放音频帧=${playerAudioFrames} 字节=${playerAudioBytes}"
+                )
+                playerAudioFrames = 0L
+                playerAudioBytes = 0L
+            }
+            // ★ 3012 用户开口（服务端为这一轮开启 ASR 任务）→ 讲话迹象 + 重置兜底计时
+            SpeechEngineDefines.MESSAGE_TYPE_DIALOG_ASR_INFO -> {
+                L.i(TAG, "EVT[3012] 用户开口: $raw")
+                controller?.onSpeechSignal()
+                controller?.onActivityStart()
+            }
+            // ★ 3015 AI 文本回复：模型生成期间也算"有人在讲话"，
+            //   否则长回复在 TTS 开始前的生成空窗会被判静默而挂断
             SpeechEngineDefines.MESSAGE_TYPE_DIALOG_CHAT_RESPONSE -> {
+                controller?.onSpeechSignal()
                 runCatching {
                     val c = org.json.JSONObject(raw).optString("content")
                     if (c.isNotEmpty()) onAssistantText(c)
                 }
             }
+            // ★ 3016 AI 整轮回复结束（文本侧）→ 讲话迹象
+            3016 -> controller?.onSpeechSignal()
             SpeechEngineDefines.MESSAGE_TYPE_ENGINE_ERROR -> onError(raw)
             1001 -> main.post { setStatus("✅ 引擎已启动") }
-            1002 -> Log.i(TAG, "引擎停止")
-            else -> Log.d(TAG, "EVT[$type] $raw")
+            1002 -> L.i(TAG, "引擎停止")
+            // ★ 3018 = MESSAGE_TYPE_DIALOG_PLAYER_AUDIO，是【二进制播放音频】。
+            //   绝不能整段转字符串打日志：每 20ms 一帧、每帧几百 KB，
+            //   会把 logcat 瞬间撑爆并拖死应用（实测直接导致应用退出）。
+            // 3018 已在 onSpeechMessage 开头拦截处理（不构造 String）
+            // ★ 兜底：任何未知事件都截断，杜绝同类事故
+            else -> {
+                val brief = if (raw.length > 200) raw.take(200) + "...(len=${raw.length})" else raw
+                L.d(TAG, "EVT[$type] $brief")
+            }
         }
     }
 
-    override fun onSpeechLogid(logid: String?) { Log.d(TAG, "logid: $logid") }
+    override fun onSpeechLogid(logid: String?) { L.d(TAG, "logid: $logid") }
+
+    /** 低频讲话迹象事件的诊断日志（音频帧不打印，避免刷屏） */
+    private fun aiRespondingNote(src: String) {
+        L.i(TAG, "信号[$src] aiResponding=$aiResponding callActive=$callActive")
+    }
 
     private fun stopOfficialDialog() {
         try {
@@ -677,6 +1051,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         }
         if (callActive) return
         userBuf.setLength(0); aiBuf.setLength(0); userCur = ""; lastAsrText = ""; lastAsrWasFinal = false; receivedAudioBytes = 0
+        aiTurnList.clear(); systemMsgs.clear()
         aiResponding = false; bargeArmed = false; dropAudio = false; bargeSilenceSeen = false
         bargeVad?.flush()
         render()
@@ -693,7 +1068,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
 
         player = AudioPlayer(SeeduplexClient.OUT_RATE, audioUsage).also {
             val ok = it.start()
-            Log.i(TAG, "AudioPlayer started=$ok")
+            L.i(TAG, "AudioPlayer started=$ok")
             if (!ok) appendSystem("AudioTrack 不可用（当前环境无音频输出），仅统计收到的音频字节")
         }
         // [音源保真度验证] --ez testTone true：通过播放器发 3 秒宽带白噪声（固定种子，可跨音源对比），
@@ -724,7 +1099,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
             // [离线标定] 落盘原始麦克风音频
             dumpRaw?.let { f -> try { f.write(frame) } catch (_: Exception) {} }
             dumpFrames++
-            if (!dumpT0Mic) { dumpT0Mic = true; Log.i(TAG, "DUMP-T0 mic=${System.currentTimeMillis()}") }
+            if (!dumpT0Mic) { dumpT0Mic = true; L.i(TAG, "DUMP-T0 mic=${System.currentTimeMillis()}") }
             // 先做回声消除（优先神经网络 AEC），再同时喂给服务端与本地打断 VAD
             val clean = dtlnAec?.process(frame) ?: aec?.process(frame) ?: frame
             if (clean.isNotEmpty()) {
@@ -751,8 +1126,8 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         }
         val micOk = capture?.start() ?: false
         // 精确时间轴锚点：本次采集开始时的"已写帧数"与墙钟时间（应对采集重启造成的录音缺口）
-        Log.i(TAG, "DUMP-ANCHOR frames=$dumpFrames ts=${System.currentTimeMillis()}")
-        Log.i(TAG, "AudioCapture started=$micOk")
+        L.i(TAG, "DUMP-ANCHOR frames=$dumpFrames ts=${System.currentTimeMillis()}")
+        L.i(TAG, "AudioCapture started=$micOk")
         if (!micOk) appendSystem("麦克风不可用（模拟器）→ 请点「测试音频」喂内置语音")
 
         // 软件 AEC3：依据“硬件 AEC 是否真正生效”决定，而不是仅看 isAvailable()。
@@ -769,7 +1144,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         player?.onRender = { pcm ->
             // [离线标定] 落盘 far-end（AI 实际播出的音频，24kHz）
             dumpRender?.let { f -> try { f.write(pcm) } catch (_: Exception) {} }
-            if (!dumpT0Fe) { dumpT0Fe = true; Log.i(TAG, "DUMP-T0 far_end=${System.currentTimeMillis()}") }
+            if (!dumpT0Fe) { dumpT0Fe = true; L.i(TAG, "DUMP-T0 far_end=${System.currentTimeMillis()}") }
             aec?.feedRender(pcm)
             dtlnAec?.feedRender(pcm)   // 神经网络 AEC 的 far-end 参考
             // 更新门控参考电平（带 ~200ms 衰减保持，匹配回声的短时包络）
@@ -790,7 +1165,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         bargeRmsThreshold = (intent?.getIntExtra("bargeRms", 250) ?: 250).toDouble()
         bargeHoldMs = (intent?.getIntExtra("bargeHold", 200) ?: 200).toLong()
         bargeProbThr = ((intent?.getIntExtra("bargeProbPct", 40) ?: 40) / 100f)
-        Log.i(TAG, "software AEC3 = ${aec != null} (hwAecActive=$hwAec, delayMs=$delayMs, playerBufferMs=${player?.bufferMs}, localBarge=$localBargeEnabled, bargeProb=${bargeProbThr}, bargeHold=${bargeHoldMs}ms, tenVad=${TenVadNative.isAvailable})")
+        L.i(TAG, "software AEC3 = ${aec != null} (hwAecActive=$hwAec, delayMs=$delayMs, playerBufferMs=${player?.bufferMs}, localBarge=$localBargeEnabled, bargeProb=${bargeProbThr}, bargeHold=${bargeHoldMs}ms, tenVad=${TenVadNative.isAvailable})")
         if (aec != null) appendSystem("🎧 软件 AEC3 已启用（硬件回声消除未生效）")
 
         callActive = true
@@ -842,7 +1217,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         // 诊断日志：AI 播报期间定期记录概率与能量（用于离线核算误报/检出率）
         if (aiResponding) {
             bargeDbg++
-            if (bargeDbg % 60L == 0L) Log.i(TAG, "BARGE-PROBE prob=%.2f rms=%d run=%dms".format(prob, lastFrameRms.toInt(), bargeRunMs))
+            if (bargeDbg % 60L == 0L) L.i(TAG, "BARGE-PROBE prob=%.2f rms=%d run=%dms".format(prob, lastFrameRms.toInt(), bargeRunMs))
         }
         if (!localBargeEnabled) return
         if (!aiResponding || bargeArmed) { bargeWin.clear(); bargeRunMs = 0; return }
@@ -863,7 +1238,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         client?.sendCancel()
         val pct = (hitRatio * 100).toInt()
         main.post { appendSystem("⏹ 本地双讲检出（TEN VAD %.2f ≥ %.2f，能量 %d ≥ %d，${winFrames * 16}ms 内占比 %d%% ≥ 60%%）→ 打断 AI 播报".format(prob, bargeProbThr, lastFrameRms.toInt(), bargeRmsThreshold.toInt(), pct)) }
-        Log.i(TAG, "BARGE-HIT prob=%.2f rms=%d ratio=%d%% win=%dms".format(prob, lastFrameRms.toInt(), pct, winFrames * 16))
+        L.i(TAG, "BARGE-HIT prob=%.2f rms=%d ratio=%d%% win=%dms".format(prob, lastFrameRms.toInt(), pct, winFrames * 16))
     }
 
     /** 服务端已检测到用户开口：立即停止播报并取消当前回复。 */
@@ -871,7 +1246,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         if (!callActive || !aiResponding) return
         // [v2.9] 防噪闸门：本地 TEN VAD 未确认人声时（噪音/幻听），不打断
         if (!recentVadVoiced) {
-            Log.i(TAG, "SERVER-BARGE 被本地 VAD 闸门拦截（服务端报开口但本地判非人声）")
+            L.i(TAG, "SERVER-BARGE 被本地 VAD 闸门拦截（服务端报开口但本地判非人声）")
             return
         }
         bargeArmed = true
@@ -881,7 +1256,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         aec?.clearRender()
         client?.sendCancel()   // [v2.8.4] 之前漏了这句：只停本地播放，服务端仍在生成 → AI 会把整轮说完
         main.post { appendSystem("⏹ 服务端检出用户开口 + 本地VAD确认 → 停止播报，进入下一轮") }
-        Log.i(TAG, "SERVER-BARGE 服务端检出用户开口 → 停止播报")
+        L.i(TAG, "SERVER-BARGE 服务端检出用户开口 → 停止播报")
     }
 
     /** 无麦克风环境下的测试通道：把内置 PCM 按 20ms 节奏喂给模型。 */
@@ -916,7 +1291,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
     private fun loadAsset(name: String): ByteArray? = try {
         assets.open(name).use { it.readBytes() }
     } catch (e: Exception) {
-        Log.w(TAG, "loadAsset($name) failed: ${e.message}"); null
+        L.w(TAG, "loadAsset($name) failed: ${e.message}"); null
     }
 
     // ---------- SeeduplexClient.Listener ----------
@@ -936,20 +1311,30 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
             session.put("id", sessionId ?: "")
             // ★ 官方 demo 的 session.update 里带 model 与 output_modalities，缺了可能导致配置不生效
             session.put("model", "1.2.1.1")
-            session.put("instructions", SYSTEM_PROMPT)
+            session.put("instructions", activePrompt)
             session.put("output_modalities", org.json.JSONArray().put("text").put("audio"))
             ev.put("session", session)
             val r = dialogEngine?.sendDirective(
                 SpeechEngineDefines.DIRECTIVE_SEND_UPLINK_EVENT, ev.toString()
             )
-            Log.i(TAG, "session.update(instructions) ret=$r len=${SYSTEM_PROMPT.length}")
+            L.i(TAG, "session.update(instructions) ret=$r len=${activePrompt.length}")
         } catch (t: Throwable) {
-            Log.e(TAG, "session.update failed", t)
+            L.e(TAG, "session.update failed", t)
+        }
+        // ★ 开场白：会话建立后主动让模型说话（参考 temp-speech-digital 的 sayHello）
+        try {
+            val helloJson = org.json.JSONObject().put("content", HELLO_TEXT).toString()
+            val hr = dialogEngine?.sendDirective(
+                SpeechEngineDefines.DIRECTIVE_EVENT_SAY_HELLO, helloJson
+            )
+            L.i(TAG, "开场白 SAY_HELLO ret=$hr content=「$HELLO_TEXT」")
+        } catch (t: Throwable) {
+            L.w(TAG, "开场白下发失败: ${t.message}")
         }
         main.post {
             setStatus("🎙️ 对话中，直接说话即可")
             updateCallUi()
-            appendSystem("session.created id=$sessionId")
+            // 不再把 session id 显示成气泡
         }
     }
 
@@ -962,13 +1347,13 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
      * 避免服务端 ASR 对噪音"幻听"出文字时误触发。
      */
     override fun onUserText(delta: String, final: Boolean) {
-        controller?.onUserActivity()
+        controller?.onSpeechSignal()
         if (delta.isNotEmpty()) {
             bargeHeadBuf.append(delta)
             // 双讲判定：AI 正在回复 + 服务端产出转写 + 本地 VAD 确认是人声
             if (aiResponding && !bargeArmed && recentVadVoiced) {
                 main.post { appendSystem("⏹ 双讲检出（AI 播报中收到上行转写「${delta.take(12)}」+ 本地VAD确认）→ 打断") }
-                Log.i(TAG, "DOUBLETALK-BARGE delta=「${delta.take(12)}」")
+                L.i(TAG, "DOUBLETALK-BARGE delta=「${delta.take(12)}」")
                 onKeywordBarge()
             }
         }
@@ -1020,7 +1405,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         val head = text.trim().take(4)
         val hit = head.contains("停") || head.contains("不对") ||
                   head.contains("等等") || head.contains("别说")
-        if (hit) Log.i(TAG, "关键词命中: head=「$head」 aiResponding=$aiResponding callActive=$callActive")
+        if (hit) L.i(TAG, "关键词命中: head=「$head」 aiResponding=$aiResponding callActive=$callActive")
         return hit
     }
 
@@ -1041,19 +1426,21 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         aec?.clearRender()
         client?.sendCancel()   // 同时取消服务端侧回复，避免"停了又继续"
         main.post { appendSystem("⏹ 关键词打断（停/不对）→ 停止播报，进入下一轮（当时AI${if (wasResponding) "正在" else "已结束"}播报）") }
-        Log.i(TAG, "KEYWORD-BARGE 关键词打断 wasResponding=$wasResponding")
+        L.i(TAG, "KEYWORD-BARGE 关键词打断 wasResponding=$wasResponding")
     }
 
     /** 语音退出判定：整句文本「前 7 个字」内含有"退出"或"关闭"。 */
     private fun isExitCommand(text: String): Boolean {
         val head = text.trim().take(7)
-        return head.contains("退出") || head.contains("关闭") || head.contains("关机")
+        // 退出关键词：退出 / 关闭 / 关机 / 小艺（说“小艺小艺”亦命中，便于与 TV 原生助手共存时退出本应用）
+        return head.contains("退出") || head.contains("关闭") ||
+                head.contains("关机") || head.contains("小艺")
     }
 
     /** 执行语音退出：先挂断会话，再结束任务并结束进程（C1 / D1）。 */
     /** 关闭按钮：与语音退出同链路（挂断 → finishAndRemoveTask → killProcess） */
     private fun exitApp() {
-        Log.i(TAG, "关闭按钮 → 退出应用")
+        L.i(TAG, "关闭按钮 → 退出应用")
         try { appendSystem("⏹ 正在关闭…") } catch (_: Exception) {}
         controller?.release()
         try { if (callActive) hangup() } catch (_: Exception) {}
@@ -1063,7 +1450,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
     }
 
     private fun exitByVoice() {
-        Log.i(TAG, "语音退出指令命中 → 退出应用")
+        L.i(TAG, "语音退出指令命中 → 退出应用")
         try { appendSystem("⏹ 收到退出指令，正在退出…") } catch (_: Exception) {}
         controller?.release()                      // 停自动模式，避免挂断后进入监听/重拨
         try { if (callActive) hangup() } catch (_: Exception) {}
@@ -1074,11 +1461,22 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
 
     override fun onAssistantText(delta: String) {
         main.post {
-            aiBuf.append(delta); render()
+            aiBuf.append(delta)     // 保留原始累积（[系统] 消息等仍用它）
+            feedAiText(delta)       // ★ 三段式拆分（流式时序不变）
+            render()
         }
     }
 
     override fun onAudioStarted() {
+        // ★ 新一轮 AI 播报开始 → 复位音频字节统计
+        if (!aiResponding) {
+            aiAudioBytesTotal = 0L
+            aiAudioFirstAt = 0L
+            aiPlaybackEndsAt = 0L
+            aiAudioDurationMs = 0L
+            aiTurnStartedAt = System.currentTimeMillis()
+            playbackEndLogged = false
+        }
         aiResponding = true
         bargeArmed = false
         dropAudio = false
@@ -1086,14 +1484,18 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
     }
 
     override fun onAudioDelta(pcm: ByteArray) {
-        controller?.onAiAudio()
+        controller?.onSpeechSignal()
+        // ★ 累加播放音频字节（用于推算播放终点）
+        if (aiAudioFirstAt == 0L) aiAudioFirstAt = System.currentTimeMillis()
+        aiAudioBytesTotal += pcm.size
         if (dropAudio) return
         player?.write(pcm)
         receivedAudioBytes += pcm.size
     }
 
     override fun onAudioDone() {
-        aiResponding = false
+        // ★ 不再在此清 aiResponding！播放结束由 3020(PLAYER_FINISH_PLAY_AUDIO) 负责，
+        //   否则长回复在"数据传完但仍在播放"期间会被误判为 AI 已停 → 提前挂断。
         main.post {
             aiBuf.append("\n"); render()
             setStatus("🔊 收到 AI 音频累计 ${receivedAudioBytes} 字节（约 ${receivedAudioBytes / 48}ms @24k/16bit）")
@@ -1120,15 +1522,42 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
     private fun render() {
         if (!::bubbleBox.isInitialized) return
         bubbleBox.removeAllViews()
-        // 用户：已完成句 + 当前中间结果句
+        // 用户：已完成句 + 当前中间结果句（原话）
         val userTurns = (userBuf.toString().split("\n") + userCur)
             .filter { it.isNotBlank() }
-        val aiTurns = aiBuf.toString().split("\n").filter { it.isNotBlank() }
-        // 微信式排列：按时间顺序交替展示（用户/AI 各自出现即当行）
-        val n = maxOf(userTurns.size, aiTurns.size)
-        for (i in 0 until n) {
-            userTurns.getOrNull(i)?.let { addBubble(it, true) }
-            aiTurns.getOrNull(i)?.let { addBubble(it, false) }
+        // ★ 顺序与配对改为「显式关联」：
+        //   1) 先渲染无前置用户发言的 AI 轮次（开场白等）
+        //   2) 再按用户发言顺序：用户气泡（含其翻译）→ 紧随其关联的 AI 回复
+        aiTurnList.filter { it.userIdx < 0 }.forEach { at ->
+            val en0 = at.bracket.toString().trim()
+            val zh0 = at.corner.toString().trim()
+            if (en0.isNotEmpty() || zh0.isNotEmpty()) addBubbleAi(en0, zh0)
+        }
+        userTurns.forEachIndexed { i, u ->
+            val linked = aiTurnList.filter { it.userIdx == i }
+            val trans = linked.map { it.brace.toString().trim() }
+                .firstOrNull { it.isNotEmpty() }.orEmpty()
+            addBubbleUser(u, trans)
+            linked.forEach { at ->
+                val en = at.bracket.toString().trim()
+                val zh = at.corner.toString().trim()
+                if (en.isNotEmpty() || zh.isNotEmpty()) addBubbleAi(en, zh)
+            }
+        }
+        // 兜底：关联序号越界的 AI 轮次（如用户发言尚未落盘）仍要显示
+        aiTurnList.filter { it.userIdx >= userTurns.size }.forEach { at ->
+            val en2 = at.bracket.toString().trim()
+            val zh2 = at.corner.toString().trim()
+            if (en2.isNotEmpty() || zh2.isNotEmpty()) addBubbleAi(en2, zh2)
+        }
+        // 系统提示（灰字，居中偏左）
+        systemMsgs.forEach { msg ->
+            val sb = android.text.SpannableString(msg)
+            sb.setSpan(
+                android.text.style.ForegroundColorSpan(getColor(R.color.text_secondary)),
+                0, msg.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            addBubbleSpanned(sb, false)
         }
         // ★ 自动滚动到最新内容
         scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
@@ -1140,7 +1569,7 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
      * AI   = 左对齐 / 翠绿色背景 / 黑色字体
      * 均限最大宽度（78%），超长自动换行
      */
-    private fun addBubble(text: String, isUser: Boolean) {
+    private fun addBubbleSpanned(text: CharSequence, isUser: Boolean) {
         val tv = TextView(this)
         tv.text = text
         tv.textSize = 14f
@@ -1163,11 +1592,11 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         tv.maxWidth = (resources.displayMetrics.widthPixels * 0.72f).toInt()
         lp.width = LinearLayout.LayoutParams.WRAP_CONTENT
         if (isUser) {
-            tv.setTextColor(getColor(R.color.text_primary))      // 白色字体
+            // ★ 颜色由 Spannable 逐段控制（原话灰字 / 翻译白字）
             tv.setBackgroundResource(R.drawable.bg_bubble_user)  // 透明背景
             tv.textAlignment = android.view.View.TEXT_ALIGNMENT_VIEW_END
         } else {
-            tv.setTextColor(0xFF000000.toInt())                  // 黑色字体
+            // ★ 颜色由 Spannable 逐段控制（英文黑字 / 中文灰字）
             tv.setBackgroundResource(R.drawable.bg_bubble_ai)    // 翠绿色背景
             tv.textAlignment = android.view.View.TEXT_ALIGNMENT_VIEW_START
         }
@@ -1175,17 +1604,129 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         bubbleBox.addView(tv)
     }
 
+    /** 用户气泡：第一行=原话（灰字），第二行=花括号翻译（白字）；翻译为空则只显示原话 */
+    private fun addBubbleUser(text: String, trans: String) {
+        if (trans.isBlank()) {
+            val sb = android.text.SpannableString(text)
+            sb.setSpan(
+                android.text.style.ForegroundColorSpan(getColor(R.color.text_secondary)),
+                0, text.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            addBubbleSpanned(sb, true)
+            return
+        }
+        val body = text + "\n" + trans
+        val sb = android.text.SpannableString(body)
+        sb.setSpan(
+            android.text.style.ForegroundColorSpan(getColor(R.color.text_secondary)),
+            0, text.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        sb.setSpan(
+            android.text.style.ForegroundColorSpan(getColor(R.color.text_primary)),
+            text.length + 1, body.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        addBubbleSpanned(sb, true)
+    }
+
+    /** AI 气泡：第一行=方括号英文（黑字），第二行=方头括号中文（灰字） */
+    private fun addBubbleAi(en: String, zh: String) {
+        val black = 0xFF000000.toInt()
+        val gray = getColor(R.color.text_secondary)
+        val sb: android.text.SpannableString
+        when {
+            en.isNotBlank() && zh.isNotBlank() -> {
+                val body = en + "\n" + zh
+                sb = android.text.SpannableString(body)
+                sb.setSpan(
+                    android.text.style.ForegroundColorSpan(black),
+                    0, en.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+                sb.setSpan(
+                    android.text.style.ForegroundColorSpan(gray),
+                    en.length + 1, body.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+            }
+            en.isNotBlank() -> {
+                sb = android.text.SpannableString(en)
+                sb.setSpan(
+                    android.text.style.ForegroundColorSpan(black),
+                    0, en.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+            }
+            else -> {
+                sb = android.text.SpannableString(zh)
+                sb.setSpan(
+                    android.text.style.ForegroundColorSpan(gray),
+                    0, zh.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+            }
+        }
+        addBubbleSpanned(sb, false)
+    }
+
     private fun appendSystem(text: String) {
-        aiBuf.append("[系统] ").append(text).append("\n")
+        systemMsgs.add(text)
         render()
     }
 
     private fun setStatus(s: String) = main.post {
         lastStatus = s
-        if (::statusTv.isInitialized) statusTv.text = s
+        if (::statusTv.isInitialized) statusTv.text = displayStatus()
+    }
+
+    /**
+     * ★ 状态区只显示两种文案（A2）：
+     *   通话中 / 待唤醒：“豆包豆包”
+     * 关键警告（⚠️ / ❌ 开头）原样透出，避免遮挡必要的失败提示。
+     */
+    private fun displayStatus(): String {
+        val s = lastStatus
+        if (s.startsWith("⚠️") || s.startsWith("❌")) return s
+        val st = controller?.state
+        val inCall = callActive ||
+                st == AutoCallController.State.DIALING ||
+                st == AutoCallController.State.IN_CALL
+        return if (inCall) getString(R.string.status_in_call)
+        else getString(R.string.status_waiting)
     }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+
+    /**
+     * ★ 退到后台（onStop）→ 立即释放麦克风。
+     *
+     * 背景：本应用以 VOICE_COMMUNICATION 源占用麦克风（挂断后还会进入本地监听）。
+     * 实测（华为 KUNL-250A 安卓电视）：只要本应用持有该麦克风采集，系统热词引擎
+     * （AUDIO_SOURCE_HOTWORD / hwwakeup，负责“小艺小艺”唤醒）的采集线程会被拆掉，
+     * 导致 TV 原生语音助手无法响应。故应用不在前台时主动让出麦克风。
+     *
+     * 动作：停用自动模式（停本地监听 + 停 ticker + 挂断进行中的会话）→ 兜底停监听。
+     * 代价：后台不再自动重拨（已与用户确认 B1）。
+     */
+    override fun onStop() {
+        super.onStop()
+        if (isChangingConfigurations) return   // 配置变更（横竖屏等）不视为退后台
+        isForeground = false
+        wentBackground = true
+        L.i(TAG, "onStop → 释放麦克风（停监听/挂断），让出给系统语音助手")
+        runCatching { controller?.enabled = false }   // 内部：停监听 + 停 ticker + 挂断通话
+        runCatching { stopMonitoring() }
+        runCatching { if (callActive) hangup() }
+        runCatching { bargeVad?.flush() }
+    }
+
+    /** ★ 回到前台（onStart）→ 按“静默挂断秒数”配置恢复：>0 自动重拨，=0 仅待机。 */
+    override fun onStart() {
+        super.onStart()
+        if (!wentBackground) return           // 首次启动的 onStart 交由 onCreate 处理，避免重复拨号
+        isForeground = true
+        L.i(TAG, "onStart → 回到前台，按配置恢复自动模式")
+        runCatching {
+            val secCfg = prefs.getInt(KEY_SILENCE_SEC, AutoCallController.DEFAULT_IDLE_SILENCE_SEC)
+            controller?.idleSilenceMs = if (secCfg > 0) secCfg * 1000L else 0L
+            controller?.enabled = secCfg > 0
+        }
+    }
 
     override fun onDestroy() {
         try { dumpRaw?.close() } catch (_: Exception) {}
@@ -1207,14 +1748,15 @@ class MainActivity : AppCompatActivity(), SeeduplexClient.Listener,
         const val KEY_APPID = "volc_app_id"
         const val KEY_APPKEY = "volc_app_key"
         const val KEY_TOKEN = "volc_app_token"
+        /** 静默挂断秒数（0 = 关闭自动模式） */
+        const val KEY_SILENCE_SEC = "auto_silence_sec"
 
         /**
          * 内置系统提示词（通过 session.update 事件下发）。
          * 约束：中文/中英混合先译成英文 {英文}；英文语法错误先纠正 {英文}；
          *      再用简短简单英文作答 [English]；最后附中文翻译 【中文】。
          */
-        val SYSTEM_PROMPT = """
-            你默认讲英文。
-        """.trimIndent()
+        val HELLO_TEXT = "Hi! I'm Doubao."
+    val SYSTEM_PROMPT = "你叫豆包，用户的英文名叫 Jerry，不要暴露你是英语练习助手的角色，可以称自己是用户的好朋友以避免太过目的性，你熟悉中文和英语，善于在欢快对话中引导用户学习英语。为了让用户从零逐渐学习英语，请严格遵守如下三段式回复：第一段，用户输入内容时若是中文或中英混合则你先翻译成英文（使用花括号{}括起来），若是语法有问题的英文你先纠正成正确的英文并且不要修改原句意思（使用花括号括起来），其他情况则第一段仅保留花括号{}这两个字符（不要出现其他任何内容）；第二段，然后使用简短并且简单的英文对答回复（使用方括号[]括起来）；第三段，再将自己的回复翻译成中文（使用方头括号【】括起来），以让用户明白意思。比如 用户输入中文“你是谁？”，你先翻译成英文“{Who are you?}”，再英文对答回复“[Haha, I'm Doubao.]”，再将回复翻译成中文“【哈哈，我是豆包。】”。你的性格那叫一个热情似火，比夏天的迈阿密还烫！你超爱夸人！而且你经常管用户叫大佬或Boss！内容必须阳光积极，你严禁涉及任何负面信息；你的字典里常有“Awesome！”、“Let’s go！”、“You rock！”、“That’s cool”、“Yeah man”。最高优先级格式硬约束再次强调：若用户输入本身已是正确英文：第一段必须严格只输出 {} 这两个字符，不得重复或改写用户的话；第二段必须整体用[]包住；第三段必须整体用【】包住。"
     }
 }

@@ -1,6 +1,5 @@
 package com.mmd.englishdigital
 
-import android.util.Log
 
 /**
  * TEN VAD 的 JNI 绑定（TEN Framework / Agora，Apache-2.0）。
@@ -19,7 +18,7 @@ object TenVadNative {
         System.loadLibrary("ten_vad_jni")
         true
     } catch (t: Throwable) {
-        Log.w(TAG, "TEN VAD 不可用（${t.message}）→ 本地打断将回退为不可用")
+        L.w(TAG, "TEN VAD 不可用（${t.message}）→ 本地打断将回退为不可用")
         false
     }
 

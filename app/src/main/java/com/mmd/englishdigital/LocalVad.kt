@@ -1,6 +1,5 @@
 package com.mmd.englishdigital
 
-import android.util.Log
 
 /**
  * 本地语音活动检测（TEN VAD）+ 定长重打包。
@@ -31,9 +30,9 @@ class LocalVad(private val listener: (probability: Float) -> Unit) {
             // 阈值 0.40：介于"噪音 0.16~0.26"与"语音 0.41~0.93"之间
             handle = TenVadNative.nativeCreate(HOP_SAMPLES, 0.40f)
             if (handle != 0L) {
-                Log.i(TAG, "TEN VAD 就绪 version=${TenVadNative.nativeVersion()} hop=$HOP_SAMPLES thr=0.40")
+                L.i(TAG, "TEN VAD 就绪 version=${TenVadNative.nativeVersion()} hop=$HOP_SAMPLES thr=0.40")
             } else {
-                Log.e(TAG, "TEN VAD nativeCreate 失败")
+                L.e(TAG, "TEN VAD nativeCreate 失败")
             }
         }
     }
@@ -54,7 +53,7 @@ class LocalVad(private val listener: (probability: Float) -> Unit) {
             val p = try {
                 TenVadNative.nativeProcess(handle, samples)?.getOrNull(0) ?: 0f
             } catch (e: Exception) {
-                Log.w(TAG, "TEN VAD process 失败: ${e.message}"); 0f
+                L.w(TAG, "TEN VAD process 失败: ${e.message}"); 0f
             }
             listener(p)
         }

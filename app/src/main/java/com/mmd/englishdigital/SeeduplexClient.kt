@@ -1,7 +1,6 @@
 package com.mmd.englishdigital
 
 import android.util.Base64
-import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -171,7 +170,7 @@ class SeeduplexClient(
             return
         }
         val t = obj.optString("type")
-        Log.i("MMD-English", "RECV: $t | ${text.take(200)}")
+        L.i("MMD-English", "RECV: $t | ${text.take(200)}")
         when (t) {
             "session.created" ->
                 listener.onSessionCreated(obj.optJSONObject("session")?.optString("id"))

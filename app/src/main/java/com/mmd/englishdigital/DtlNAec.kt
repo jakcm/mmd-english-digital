@@ -1,7 +1,6 @@
 package com.mmd.englishdigital
 
 import android.content.Context
-import android.util.Log
 import org.tensorflow.lite.Interpreter
 import java.io.FileInputStream
 import java.nio.MappedByteBuffer
@@ -104,7 +103,7 @@ class DtlNAec(context: Context, private val farEndDelayMs: Int = 150) {
         m1OutMask = outIdx(i1, "Identity"); m1OutState = outIdx(i1, "Identity_1")
         m2InEst = inIdx(i2, "input_6"); m2InLpb = inIdx(i2, "input_7"); m2InState = inIdx(i2, "input_8")
         m2OutBlock = outIdx(i2, "Identity"); m2OutState = outIdx(i2, "Identity_1")
-        Log.i(TAG, "DTLN-aec 就绪: 模型1(mic=$m1InMic lpb=$m1InLpb state=$m1InState) 模型2(est=$m2InEst lpb=$m2InLpb state=$m2InState) 延迟=${farEndDelayMs}ms")
+        L.i(TAG, "DTLN-aec 就绪: 模型1(mic=$m1InMic lpb=$m1InLpb state=$m1InState) 模型2(est=$m2InEst lpb=$m2InLpb state=$m2InState) 延迟=${farEndDelayMs}ms")
     }
 
     private fun loadModel(ctx: Context, name: String): MappedByteBuffer {
@@ -181,7 +180,7 @@ class DtlNAec(context: Context, private val farEndDelayMs: Int = 150) {
         if (obsN > 50 && now - lastLog > 3000) {
             lastLog = now
             val r = sqrt(obsSumRaw / obsN) * 32768; val o = sqrt(obsSumOut / obsN) * 32768
-            Log.i(TAG, "DTLN-ERLE≈%.1f dB（原始RMS=%.0f 消除后RMS=%.0f 参考RMS=%.0f）".format(
+            L.i(TAG, "DTLN-ERLE≈%.1f dB（原始RMS=%.0f 消除后RMS=%.0f 参考RMS=%.0f）".format(
                 20 * ln((r / maxOf(o, 1e-6))).let { it / ln(10.0) }, r, o, feNow * 32768))
             obsSumRaw = 0.0; obsSumOut = 0.0; obsN = 0
         }

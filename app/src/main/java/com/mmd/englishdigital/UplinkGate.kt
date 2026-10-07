@@ -1,6 +1,5 @@
 package com.mmd.englishdigital
 
-import android.util.Log
 import kotlin.math.sqrt
 
 /**
@@ -69,7 +68,7 @@ class UplinkGate(
             val now = System.currentTimeMillis()
             if (now - lastLog > 1000) {
                 lastLog = now
-                Log.i(TAG, "上行门控: 放行 rms=${level.toInt()} 补发预滚=${out.size - 1}帧")
+                L.i(TAG, "上行门控: 放行 rms=${level.toInt()} 补发预滚=${out.size - 1}帧")
             }
             return out
         }
